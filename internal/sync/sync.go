@@ -111,13 +111,9 @@ func syncReadOnly(ctx context.Context, repoPath string, timeout time.Duration) S
 func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, timeout time.Duration) SyncResult {
 	debounceDur := parseDebounce(cfg.Debounce)
 
-	out, err := exec.Command("git", "-C", repoPath, "ls-files", "-z").Output()
+	files, err := git.ListTrackedFiles(repoPath)
 	if err != nil {
 		return SyncResult{State: "stuck", Error: fmt.Sprintf("listing tracked files: %v", err)}
-	}
-	files := strings.Split(string(out), "\x00")
-	if len(files) > 0 && files[len(files)-1] == "" {
-		files = files[:len(files)-1]
 	}
 
 	now := time.Now()

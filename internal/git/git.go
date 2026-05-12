@@ -86,6 +86,19 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 	return string(out), err
 }
 
+func ListTrackedFiles(repoPath string) ([]string, error) {
+	cmd := exec.Command("git", "-C", repoPath, "ls-files", "-z")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	raw := strings.TrimRight(string(out), "\x00")
+	if raw == "" {
+		return nil, nil
+	}
+	return strings.Split(raw, "\x00"), nil
+}
+
 var networkErrorPatterns = []string{
 	"could not resolve host",
 	"connection refused",

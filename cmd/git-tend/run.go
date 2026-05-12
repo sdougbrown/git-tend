@@ -43,5 +43,5 @@ func runRepo(cmd *cobra.Command, args []string) error {
 	if result.State == "ok" {
 		return nil
 	}
-	return fmt.Errorf("sync failed: %s", result.State)
+	return fmt.Errorf("sync failed (%s): %s", result.State, result.Error)
 }
