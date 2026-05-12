@@ -14,9 +14,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/dbrown/git-tend/internal/commit"
-	"github.com/dbrown/git-tend/internal/config"
-	"github.com/dbrown/git-tend/internal/git"
+	"github.com/sdougbrown/git-tend/internal/commit"
+	"github.com/sdougbrown/git-tend/internal/config"
+	"github.com/sdougbrown/git-tend/internal/git"
 )
 
 type SyncResult struct {

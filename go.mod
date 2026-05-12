@@ -1,4 +1,4 @@
-module github.com/dbrown/git-tend
+module github.com/sdougbrown/git-tend
 
 go 1.26.1
 

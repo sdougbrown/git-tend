@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dbrown/git-tend/internal/config"
-	"github.com/dbrown/git-tend/internal/daemon"
-	"github.com/dbrown/git-tend/internal/paths"
+	"github.com/sdougbrown/git-tend/internal/config"
+	"github.com/sdougbrown/git-tend/internal/daemon"
+	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
 func init() {

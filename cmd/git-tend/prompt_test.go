@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dbrown/git-tend/internal/status"
+	"github.com/sdougbrown/git-tend/internal/status"
 )
 
 func BenchmarkPrompt(b *testing.B) {

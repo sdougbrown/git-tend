@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dbrown/git-tend/internal/config"
-	"github.com/dbrown/git-tend/internal/scan"
-	"github.com/dbrown/git-tend/internal/status"
-	gitSync "github.com/dbrown/git-tend/internal/sync"
+	"github.com/sdougbrown/git-tend/internal/config"
+	"github.com/sdougbrown/git-tend/internal/scan"
+	"github.com/sdougbrown/git-tend/internal/status"
+	gitSync "github.com/sdougbrown/git-tend/internal/sync"
 )
 
 type offlineState struct {
