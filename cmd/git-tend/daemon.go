@@ -26,7 +26,8 @@ var daemonCmd = &cobra.Command{
 
 func runDaemon(cmd *cobra.Command, args []string) error {
 	configDir := paths.ConfigDir()
-	userCfg, err := config.ParseUserConfig(filepath.Join(configDir, "config.toml"))
+	configPath := filepath.Join(configDir, "config.toml")
+	userCfg, err := config.ParseUserConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("loading user config: %w", err)
 	}
@@ -45,6 +46,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	logger := daemon.NewLogger(level)
 	stateDir := paths.StateDir()
-	d := daemon.New(userCfg, stateDir, logger)
+	d := daemon.New(userCfg, configPath, stateDir, logger)
 	return d.Run(context.Background())
 }

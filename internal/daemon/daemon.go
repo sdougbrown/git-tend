@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,6 +25,7 @@ type offlineState struct {
 
 type Daemon struct {
 	userCfg           *config.UserConfig
+	configPath        string
 	stateDir          string
 	logger            *slog.Logger
 	mu                sync.Mutex
@@ -39,7 +39,7 @@ type Daemon struct {
 	offlineBackoffCap time.Duration
 }
 
-func New(userCfg *config.UserConfig, stateDir string, logger *slog.Logger) *Daemon {
+func New(userCfg *config.UserConfig, configPath, stateDir string, logger *slog.Logger) *Daemon {
 	interval, err := time.ParseDuration(userCfg.Interval)
 	if err != nil || interval <= 0 {
 		interval = 60 * time.Second
@@ -52,6 +52,7 @@ func New(userCfg *config.UserConfig, stateDir string, logger *slog.Logger) *Daem
 
 	return &Daemon{
 		userCfg:           userCfg,
+		configPath:        configPath,
 		stateDir:          stateDir,
 		logger:            logger,
 		offline:           make(map[string]*offlineState),
@@ -91,7 +92,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case sig := <-sigCh:
 			switch sig {
 			case syscall.SIGHUP:
-				d.logger.Info("received SIGHUP, rescanning")
+				d.logger.Info("received SIGHUP, reloading config and rescanning")
+				if newCfg, err := config.ParseUserConfig(d.configPath); err != nil {
+					d.logger.Error("reloading config", "error", err)
+				} else {
+					d.mu.Lock()
+					d.userCfg = newCfg
+					d.mu.Unlock()
+				}
 				d.rescanRoots()
 			case syscall.SIGINT, syscall.SIGTERM:
 				d.logger.Info("shutting down", "signal", sig.String())
@@ -229,11 +237,11 @@ func (d *Daemon) tick(ctx context.Context) {
 
 			if off.consecutiveFailures >= 3 {
 				shift := off.consecutiveFailures - 2
-				if shift > 30 {
-					shift = 30
+				if shift > 20 {
+					shift = 20
 				}
-				backoff := d.interval * time.Duration(int64(math.Pow(2, float64(shift))))
-				if backoff > d.offlineBackoffCap {
+				backoff := d.interval * time.Duration(int64(1)<<shift)
+				if backoff <= 0 || backoff > d.offlineBackoffCap {
 					backoff = d.offlineBackoffCap
 				}
 				off.nextAttemptAt = now.Add(backoff)

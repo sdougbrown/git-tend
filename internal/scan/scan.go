@@ -67,7 +67,7 @@ func walkRoot(root string, maxDepth int) []Repo {
 			return filepath.SkipDir
 		}
 
-		if strings.HasPrefix(name, ".") {
+		if path != root && strings.HasPrefix(name, ".") {
 			return filepath.SkipDir
 		}
 

@@ -82,7 +82,7 @@ func TestPIDRefusal(t *testing.T) {
 
 	cfg := &config.UserConfig{}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	d := New(cfg, stateDir, logger)
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
 
 	err := d.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "already running") {
@@ -110,7 +110,7 @@ func TestDaemonTickIntegration(t *testing.T) {
 	}
 	stateDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	d := New(cfg, stateDir, logger)
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
 	d.rescanRoots()
 
 	if len(d.repos) != 2 {
@@ -211,7 +211,7 @@ func TestRescanRoots(t *testing.T) {
 	}
 	stateDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	d := New(cfg, stateDir, logger)
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
 
 	d.rescanRoots()
 	if len(d.repos) != 1 {
@@ -272,7 +272,7 @@ func TestOfflineBackoff(t *testing.T) {
 	}
 	stateDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	d := New(cfg, stateDir, logger)
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
 	d.rescanRoots()
 
 	if len(d.repos) != 1 {
