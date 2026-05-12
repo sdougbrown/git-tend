@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -46,6 +47,99 @@ func ParseDuration(s string) (time.Duration, error) {
 		return 0, nil
 	}
 	return time.ParseDuration(s)
+}
+
+type UserConfig struct {
+	Roots             []string `toml:"roots"`
+	Interval          string   `toml:"interval"`
+	LogLevel          string   `toml:"log_level"`
+	EscalateAfterDays int      `toml:"escalate_after_days"`
+	NetworkTimeout    string   `toml:"network_timeout"`
+	OfflineBackoffCap string   `toml:"offline_backoff_cap"`
+	ScanDepth         int      `toml:"scan_depth"`
+}
+
+var defaultRoots = []string{"~/Code", "~/.dotfiles", "~/.botfiles"}
+
+var validLogLevels = map[string]bool{
+	"debug": true,
+	"info":  true,
+	"warn":  true,
+	"error": true,
+}
+
+func ParseUserConfig(path string) (*UserConfig, error) {
+	cfg := &UserConfig{
+		Roots:             defaultRoots,
+		Interval:          "60s",
+		LogLevel:          "info",
+		EscalateAfterDays: 3,
+		NetworkTimeout:    "30s",
+		OfflineBackoffCap: "30m",
+		ScanDepth:         4,
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("reading user config %s: %w", path, err)
+	}
+
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parsing user config %s: %w", path, err)
+	}
+
+	if len(cfg.Roots) == 0 {
+		cfg.Roots = defaultRoots
+	}
+
+	if cfg.Interval != "" {
+		if _, err := time.ParseDuration(cfg.Interval); err != nil {
+			return nil, fmt.Errorf("invalid interval %q: %w", cfg.Interval, err)
+		}
+	}
+	if cfg.Interval == "" {
+		cfg.Interval = "60s"
+	}
+
+	if cfg.LogLevel != "" {
+		if !validLogLevels[cfg.LogLevel] {
+			return nil, fmt.Errorf("invalid log_level %q: must be debug, info, warn, or error", cfg.LogLevel)
+		}
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+
+	if cfg.EscalateAfterDays <= 0 {
+		cfg.EscalateAfterDays = 3
+	}
+
+	if cfg.NetworkTimeout != "" {
+		if _, err := time.ParseDuration(cfg.NetworkTimeout); err != nil {
+			return nil, fmt.Errorf("invalid network_timeout %q: %w", cfg.NetworkTimeout, err)
+		}
+	}
+	if cfg.NetworkTimeout == "" {
+		cfg.NetworkTimeout = "30s"
+	}
+
+	if cfg.OfflineBackoffCap != "" {
+		if _, err := time.ParseDuration(cfg.OfflineBackoffCap); err != nil {
+			return nil, fmt.Errorf("invalid offline_backoff_cap %q: %w", cfg.OfflineBackoffCap, err)
+		}
+	}
+	if cfg.OfflineBackoffCap == "" {
+		cfg.OfflineBackoffCap = "30m"
+	}
+
+	if cfg.ScanDepth <= 0 {
+		cfg.ScanDepth = 4
+	}
+
+	return cfg, nil
 }
 
 func Parse(path string) (*Config, error) {
