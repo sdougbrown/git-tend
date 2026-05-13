@@ -86,6 +86,12 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 	return string(out), err
 }
 
+func DiffCached(repoPath string) (string, error) {
+	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached")
+	out, err := cmd.Output()
+	return string(out), err
+}
+
 func ListTrackedFiles(repoPath string) ([]string, error) {
 	cmd := exec.Command("git", "-C", repoPath, "ls-files", "-z")
 	out, err := cmd.Output()

@@ -1,9 +1,12 @@
 package commit
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 type change struct {
@@ -101,4 +104,71 @@ func topLevelDir(path string) string {
 		return "."
 	}
 	return path[:idx]
+}
+
+func GenerateWithModel(diffOutput string, emoji string, fallbackThreshold int, modelCmd string, modelTimeout time.Duration, fullDiff string) string {
+	msg := Generate(diffOutput, emoji, fallbackThreshold)
+
+	if modelCmd == "" {
+		return msg
+	}
+
+	if !isLowInformation(msg) {
+		return msg
+	}
+
+	if modelTimeout == 0 {
+		modelTimeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), modelTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", modelCmd)
+	cmd.Stdin = strings.NewReader(fullDiff)
+	out, err := cmd.Output()
+	if err != nil {
+		return msg
+	}
+
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		return msg
+	}
+
+	if len(result) > 72 {
+		result = result[:72]
+	}
+
+	if emoji != "" && !strings.HasPrefix(result, emoji) {
+		result = emoji + " " + result
+	}
+
+	return result
+}
+
+func isLowInformation(msg string) bool {
+	if !strings.Contains(msg, "sync ") {
+		return false
+	}
+	if strings.Contains(msg, "(") || strings.Contains(msg, ",") {
+		return false
+	}
+	if !strings.HasSuffix(msg, " files") {
+		return false
+	}
+	rest := msg[:len(msg)-len(" files")]
+	lastSpace := strings.LastIndex(rest, " ")
+	if lastSpace == -1 {
+		return false
+	}
+	digits := rest[lastSpace+1:]
+	if digits == "" {
+		return false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

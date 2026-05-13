@@ -159,7 +159,23 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 	}
 
 	if strings.TrimSpace(diff) != "" {
-		msg := commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
+		var msg string
+		if cfg.Commit.ModelCmd != "" {
+			modelTimeout := 30 * time.Second
+			if cfg.Commit.ModelTimeout != "" {
+				if d, err := time.ParseDuration(cfg.Commit.ModelTimeout); err == nil {
+					modelTimeout = d
+				}
+			}
+			fullDiff, fullErr := git.DiffCached(repoPath)
+			if fullErr == nil {
+				msg = commit.GenerateWithModel(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh, cfg.Commit.ModelCmd, modelTimeout, fullDiff)
+			} else {
+				msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
+			}
+		} else {
+			msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
+		}
 		if err := git.Commit(repoPath, msg, cfg.Commit.NoVerify); err != nil {
 			writeStuck(repoPath, "hook_failed", "git commit", exitCodeFromErr(err), err.Error())
 			return SyncResult{State: "stuck", Error: fmt.Sprintf("commit: %v", err)}
