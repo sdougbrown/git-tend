@@ -26,14 +26,16 @@ The daemon also tracks an "offline" state separately from "stuck." If a fetch or
 
 **Prerequisites:** macOS or Linux. The binary is statically compiled — no runtime dependencies.
 
-Download a release binary and put it on your `PATH` (releases coming soon):
+Download a release binary from the [releases page](https://github.com/sdougbrown/git-tend/releases/latest) and put it on your `PATH`. Replace `<os>` with `darwin` or `linux` and `<arch>` with `arm64` or `amd64`:
 
 ```sh
 mkdir -p ~/.local/bin
-# download the binary for your platform, then:
-mv git-tend ~/.local/bin/git-tend
+curl -L -o ~/.local/bin/git-tend \
+  https://github.com/sdougbrown/git-tend/releases/latest/download/git-tend_<os>_<arch>
 chmod +x ~/.local/bin/git-tend
 ```
+
+Verify with `git-tend --version`.
 
 Or build from source (requires Go 1.22 or later):
 

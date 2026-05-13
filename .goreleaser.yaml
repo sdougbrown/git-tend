@@ -1,0 +1,30 @@
+version: 2
+
+project_name: git-tend
+
+builds:
+  - main: ./cmd/git-tend
+    id: git-tend
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - arm64
+      - amd64
+    binary: git-tend
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+
+archives:
+  - format: binary
+    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true
+
+release:
+  draft: false
+  prerelease: false
