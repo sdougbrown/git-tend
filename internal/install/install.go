@@ -169,6 +169,11 @@ const (
 	fenceEnd   = "# <<< git-tend prompt <<<"
 )
 
+const (
+	greetFenceStart = "# >>> git-tend greet >>>"
+	greetFenceEnd   = "# <<< git-tend greet <<<"
+)
+
 func zshSnippet() string {
 	return fenceStart + "\nPROMPT='$(git-tend prompt 2>/dev/null) '$PROMPT\n" + fenceEnd + "\n"
 }
@@ -350,6 +355,103 @@ func UninstallShellPrompt(shell string) (string, error) {
 	contentStr := string(content)
 
 	cleaned, removed := removeFencedBlock(contentStr, fenceStart, fenceEnd)
+	if !removed {
+		return "", nil
+	}
+
+	if cleaned == "" {
+		if err := os.Remove(rcPath); err != nil {
+			return "", fmt.Errorf("remove %s: %w", rcPath, err)
+		}
+		return rcPath, nil
+	}
+
+	if err := os.WriteFile(rcPath, []byte(cleaned), 0644); err != nil {
+		return "", fmt.Errorf("write %s: %w", rcPath, err)
+	}
+	return rcPath, nil
+}
+
+func greetSnippet() string {
+	return greetFenceStart + "\ngit-tend greet 2>/dev/null\n" + greetFenceEnd + "\n"
+}
+
+func InstallShellGreet(shell string, force, dryRun bool) (string, error) {
+	shell = detectShell(shell)
+	if shell == "" {
+		return "", fmt.Errorf("could not detect shell")
+	}
+
+	rcPath, err := rcFilePath(shell)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(rcPath)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("read %s: %w", rcPath, err)
+	}
+	contentStr := string(content)
+
+	hasFences := strings.Contains(contentStr, greetFenceStart)
+
+	if hasFences && !force {
+		return "", nil
+	}
+
+	snippet := greetSnippet()
+
+	var newContent string
+	if hasFences && force {
+		cleaned, _ := removeFencedBlock(contentStr, greetFenceStart, greetFenceEnd)
+		if !strings.HasSuffix(cleaned, "\n") {
+			cleaned += "\n"
+		}
+		newContent = cleaned + snippet
+	} else {
+		if len(contentStr) > 0 && !strings.HasSuffix(contentStr, "\n") {
+			contentStr += "\n"
+		}
+		newContent = contentStr + snippet
+	}
+
+	if dryRun {
+		fmt.Printf("Would write to %s:\n", rcPath)
+		if contentStr != newContent {
+			fmt.Print(diff(contentStr, newContent))
+		} else {
+			fmt.Println("(no changes)")
+		}
+		return "", nil
+	}
+
+	if err := os.WriteFile(rcPath, []byte(newContent), 0644); err != nil {
+		return "", fmt.Errorf("write %s: %w", rcPath, err)
+	}
+	return rcPath, nil
+}
+
+func UninstallShellGreet(shell string) (string, error) {
+	shell = detectShell(shell)
+	if shell == "" {
+		return "", fmt.Errorf("could not detect shell")
+	}
+
+	rcPath, err := rcFilePath(shell)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(rcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read %s: %w", rcPath, err)
+	}
+	contentStr := string(content)
+
+	cleaned, removed := removeFencedBlock(contentStr, greetFenceStart, greetFenceEnd)
 	if !removed {
 		return "", nil
 	}

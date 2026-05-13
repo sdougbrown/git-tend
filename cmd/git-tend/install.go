@@ -11,6 +11,7 @@ import (
 var (
 	installUserOnly    bool
 	installShellPrompt bool
+	installShellGreet  bool
 	installDryRun      bool
 	installForce       bool
 	installShell       string
@@ -25,6 +26,7 @@ var installCmd = &cobra.Command{
 
 var (
 	uninstallShellPrompt bool
+	uninstallShellGreet  bool
 	uninstallShell       string
 )
 
@@ -38,11 +40,13 @@ var uninstallCmd = &cobra.Command{
 func init() {
 	installCmd.Flags().BoolVar(&installUserOnly, "user-only", false, "Write the unit/plist file but don't load the service")
 	installCmd.Flags().BoolVar(&installShellPrompt, "shell-prompt", false, "Install the prompt snippet into shell rc")
+	installCmd.Flags().BoolVar(&installShellGreet, "shell-greet", false, "Install the greet snippet into shell rc")
 	installCmd.Flags().BoolVar(&installDryRun, "dry-run", false, "Print what would be done, don't actually do it")
 	installCmd.Flags().BoolVar(&installForce, "force", false, "Overwrite existing shell prompt fences")
 	installCmd.Flags().StringVar(&installShell, "shell", "", "Shell name override (zsh, bash, fish)")
 
 	uninstallCmd.Flags().BoolVar(&uninstallShellPrompt, "shell-prompt", false, "Remove the prompt snippet from shell rc")
+	uninstallCmd.Flags().BoolVar(&uninstallShellGreet, "shell-greet", false, "Remove the greet snippet from shell rc")
 	uninstallCmd.Flags().StringVar(&uninstallShell, "shell", "", "Shell name override (zsh, bash, fish)")
 
 	rootCmd.AddCommand(installCmd)
@@ -50,7 +54,9 @@ func init() {
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
-	if !installShellPrompt {
+	hasShellFlag := installShellPrompt || installShellGreet
+
+	if !hasShellFlag {
 		var servicePath string
 		var err error
 		if install.IsMacOS() {
@@ -86,11 +92,26 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if installShellGreet {
+		result, err := install.InstallShellGreet(installShell, installForce, installDryRun)
+		if err != nil {
+			return fmt.Errorf("installing shell greet: %w", err)
+		}
+		if result != "" {
+			fmt.Printf("greet installed in %s\n", result)
+		} else if installDryRun {
+		} else {
+			fmt.Println("greet already installed")
+		}
+	}
+
 	return nil
 }
 
 func runUninstall(cmd *cobra.Command, args []string) error {
-	if !uninstallShellPrompt {
+	hasShellFlag := uninstallShellPrompt || uninstallShellGreet
+
+	if !hasShellFlag {
 		if err := install.UnloadService(); err != nil {
 			return fmt.Errorf("unloading service: %w", err)
 		}
@@ -111,6 +132,18 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 			fmt.Printf("prompt removed from %s\n", result)
 		} else {
 			fmt.Println("prompt not found")
+		}
+	}
+
+	if uninstallShellGreet {
+		result, err := install.UninstallShellGreet(uninstallShell)
+		if err != nil {
+			return fmt.Errorf("uninstalling shell greet: %w", err)
+		}
+		if result != "" {
+			fmt.Printf("greet removed from %s\n", result)
+		} else {
+			fmt.Println("greet not found")
 		}
 	}
 

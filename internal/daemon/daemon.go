@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/git-tend/internal/config"
+	"github.com/sdougbrown/git-tend/internal/notify"
 	"github.com/sdougbrown/git-tend/internal/scan"
 	"github.com/sdougbrown/git-tend/internal/status"
 	gitSync "github.com/sdougbrown/git-tend/internal/sync"
@@ -165,6 +167,18 @@ func (d *Daemon) tick(ctx context.Context) {
 	now := time.Now()
 
 	for _, repo := range repos {
+		snoozedUntil := d.readSnooze(repo.Path)
+		if !snoozedUntil.IsZero() && time.Now().Before(snoozedUntil) {
+			d.mu.Lock()
+			rs := d.repoStatus[repo.Path]
+			rs.PriorState = rs.CurrentState
+			rs.CurrentState = "snoozed"
+			rs.SnoozedUntil = snoozedUntil.UTC().Format(time.RFC3339)
+			d.repoStatus[repo.Path] = rs
+			d.mu.Unlock()
+			continue
+		}
+
 		stuckPath := filepath.Join(repo.Path, ".gittend.stuck")
 		if _, err := os.Stat(stuckPath); err == nil {
 			if !d.stuckLogged[repo.Path] {
@@ -173,6 +187,7 @@ func (d *Daemon) tick(ctx context.Context) {
 			}
 			d.mu.Lock()
 			rs := d.repoStatus[repo.Path]
+			oldState := rs.CurrentState
 			if rs.CurrentState != "stuck" {
 				rs.PriorState = rs.CurrentState
 				rs.CurrentState = "stuck"
@@ -183,6 +198,9 @@ func (d *Daemon) tick(ctx context.Context) {
 			}
 			d.repoStatus[repo.Path] = rs
 			d.mu.Unlock()
+			if oldState != rs.CurrentState {
+				d.maybeNotify(repo.Path, oldState, rs.CurrentState, repo.Config, "stuck flag set")
+			}
 			continue
 		}
 
@@ -202,6 +220,7 @@ func (d *Daemon) tick(ctx context.Context) {
 
 		d.mu.Lock()
 		rs := d.repoStatus[repo.Path]
+		oldState := rs.CurrentState
 		rs.Mode = repo.Config.Mode
 
 		switch result.State {
@@ -270,6 +289,10 @@ func (d *Daemon) tick(ctx context.Context) {
 
 		d.repoStatus[repo.Path] = rs
 		d.mu.Unlock()
+
+		if result.State != "skipped" && oldState != rs.CurrentState {
+			d.maybeNotify(repo.Path, oldState, rs.CurrentState, repo.Config, rs.LastError)
+		}
 	}
 
 	d.writeStatus()
@@ -290,6 +313,44 @@ func (d *Daemon) writeStatus() {
 
 	if err := status.Write(filepath.Join(d.stateDir, "status.json"), sf); err != nil {
 		d.logger.Error("writing status", "error", err)
+	}
+}
+
+func (d *Daemon) readSnooze(repoPath string) time.Time {
+	snoozesPath := filepath.Join(d.stateDir, "snoozes.json")
+	data, err := os.ReadFile(snoozesPath)
+	if err != nil {
+		return time.Time{}
+	}
+
+	var snoozes map[string]string
+	if err := json.Unmarshal(data, &snoozes); err != nil {
+		return time.Time{}
+	}
+
+	untilStr, ok := snoozes[repoPath]
+	if !ok {
+		return time.Time{}
+	}
+
+	t, err := time.Parse(time.RFC3339, untilStr)
+	if err != nil {
+		return time.Time{}
+	}
+
+	return t
+}
+
+func (d *Daemon) maybeNotify(repoPath string, prior, current string, cfg *config.Config, reason string) {
+	switch {
+	case prior == "ok" && current == "stuck" && cfg.Notify.OnStuck:
+		msg := fmt.Sprintf("%s is stuck", filepath.Base(repoPath))
+		if reason != "" {
+			msg += " — " + reason
+		}
+		notify.Notify("git-tend", msg)
+	case prior == "stuck" && current == "ok" && cfg.Notify.OnRecovered:
+		notify.Notify("git-tend", fmt.Sprintf("%s recovered", filepath.Base(repoPath)))
 	}
 }
 
