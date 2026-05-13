@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dbrown/git-tend/internal/config"
-	"github.com/dbrown/git-tend/internal/status"
+	"github.com/sdougbrown/git-tend/internal/config"
+	"github.com/sdougbrown/git-tend/internal/status"
 )
 
 func testGit(t *testing.T, dir string, args ...string) string {

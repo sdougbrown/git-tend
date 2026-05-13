@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/dbrown/git-tend/internal/config"
+	"github.com/sdougbrown/git-tend/internal/config"
 )
 
 func testGit(t *testing.T, dir string, args ...string) string {
