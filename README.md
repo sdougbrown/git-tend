@@ -242,6 +242,7 @@ on_recovered = false
 | `git-tend unstick <path>` | Remove the `.gittend.stuck` flag and re-enable the repo |
 | `git-tend snooze <path> [duration]` | Suppress stuck surfacing for a repo; default duration is 24h |
 | `git-tend reload` | Send SIGHUP to the running daemon to reload config and rescan roots |
+| `git-tend restart` | Stop the daemon so the service manager respawns it (picks up a rebuilt binary) |
 | `git-tend logs` | Print the daemon log |
 | `git-tend logs -f` | Tail the daemon log |
 | `git-tend install` | Install and start the launchd/systemd service |
