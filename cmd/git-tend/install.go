@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dbrown/git-tend/internal/install"
+	"github.com/sdougbrown/git-tend/internal/install"
 )
 
 var (
