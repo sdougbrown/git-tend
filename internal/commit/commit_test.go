@@ -1,7 +1,9 @@
 package commit
 
 import (
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestGenerate(t *testing.T) {
@@ -147,5 +149,55 @@ func TestGenerate(t *testing.T) {
 				t.Errorf("Generate() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGenerateWithModel(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tlib/b.go\nM\tcmd/c.go\nM\tpkg/d.go\nM\tinternal/e.go\nM\ttest/f.go\nM\tdocs/g.go"
+	modelCmd := "echo 'add feature X'"
+	result := GenerateWithModel(diff, "🐌", 3, modelCmd, 30*time.Second, "fake full diff\n")
+
+	if result != "🐌 add feature X" {
+		t.Errorf("expected model output, got %q", result)
+	}
+}
+
+func TestGenerateWithModelTimeout(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tlib/b.go\nM\tcmd/c.go\nM\tpkg/d.go\nM\tinternal/e.go\nM\ttest/f.go\nM\tdocs/g.go"
+
+	modelCmd := "sleep 60"
+	result := GenerateWithModel(diff, "🐌", 3, modelCmd, 100*time.Millisecond, "fake full diff\n")
+
+	if !strings.Contains(result, "sync") || !strings.Contains(result, "files") {
+		t.Errorf("expected fallback to deterministic, got %q", result)
+	}
+	if !strings.HasPrefix(result, "🐌 ") {
+		t.Errorf("expected emoji prefix in fallback, got %q", result)
+	}
+}
+
+func TestGenerateWithModelExitError(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tlib/b.go\nM\tcmd/c.go\nM\tpkg/d.go\nM\tinternal/e.go\nM\ttest/f.go\nM\tdocs/g.go"
+
+	modelCmd := "exit 1"
+	result := GenerateWithModel(diff, "🐌", 3, modelCmd, 5*time.Second, "fake full diff\n")
+
+	if !strings.Contains(result, "sync") {
+		t.Errorf("expected fallback, got %q", result)
+	}
+}
+
+func TestGenerateWithModelBelowThreshold(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tsrc/b.go"
+
+	modelCmd := "echo 'should not be called'"
+	result := GenerateWithModel(diff, "🐌", 3, modelCmd, 30*time.Second, "")
+
+	if strings.Contains(result, "should not be called") {
+		t.Error("model should not have been called below threshold")
+	}
+	expectedPrefix := "🐌 update"
+	if !strings.HasPrefix(result, expectedPrefix) {
+		t.Errorf("expected deterministic message, got %q", result)
 	}
 }
