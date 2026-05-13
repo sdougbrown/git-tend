@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/install"
+	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
 var (
@@ -71,6 +77,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("service file written to %s\n", servicePath)
 
+		if err := bootstrapUserConfig(); err != nil {
+			return fmt.Errorf("bootstrapping config: %w", err)
+		}
+
 		if !installUserOnly {
 			if err := install.LoadService(); err != nil {
 				return fmt.Errorf("loading service: %w", err)
@@ -106,6 +116,63 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func bootstrapUserConfig() error {
+	configPath := filepath.Join(paths.ConfigDir(), "config.toml")
+	if _, err := os.Stat(configPath); err == nil {
+		fmt.Printf("config already present at %s — leaving untouched\n", configPath)
+		return nil
+	}
+
+	roots := config.DefaultRoots()
+	if isStdinTTY() {
+		if chosen, ok := promptForRoots(roots); ok {
+			roots = chosen
+		}
+	}
+
+	if err := config.WriteDefaultConfig(configPath, roots); err != nil {
+		return err
+	}
+	fmt.Printf("config written to %s (scanning: %s)\n", configPath, strings.Join(roots, ", "))
+	fmt.Println("edit it any time, then run 'git-tend reload' to apply changes")
+	return nil
+}
+
+func isStdinTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func promptForRoots(def []string) ([]string, bool) {
+	fmt.Printf("Which directories should git-tend scan for .gittend repos?\n")
+	fmt.Printf("  (comma-separated; press enter for default) [%s]: ", strings.Join(def, ", "))
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, false
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, false
+	}
+
+	parts := strings.Split(line, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 func runUninstall(cmd *cobra.Command, args []string) error {

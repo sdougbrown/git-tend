@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -59,7 +61,15 @@ type UserConfig struct {
 	ScanDepth         int      `toml:"scan_depth"`
 }
 
-var defaultRoots = []string{"~/Code", "~/.dotfiles", "~/.botfiles"}
+var defaultRoots = []string{"~/Code"}
+
+// DefaultRoots returns a copy of the built-in default roots used when no
+// config file exists and no roots are configured.
+func DefaultRoots() []string {
+	out := make([]string, len(defaultRoots))
+	copy(out, defaultRoots)
+	return out
+}
 
 var validLogLevels = map[string]bool{
 	"debug": true,
@@ -140,6 +150,64 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// WriteDefaultConfig writes a commented TOML template to path. If roots is
+// empty, the built-in defaults are used. It is a no-op if the file already
+// exists; callers should check beforehand if they care to distinguish.
+func WriteDefaultConfig(path string, roots []string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking config path %s: %w", path, err)
+	}
+
+	if len(roots) == 0 {
+		roots = defaultRoots
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+
+	quoted := make([]string, len(roots))
+	for i, r := range roots {
+		quoted[i] = fmt.Sprintf("%q", r)
+	}
+	rootsLine := "[" + strings.Join(quoted, ", ") + "]"
+
+	body := `# git-tend daemon configuration
+# Docs: https://github.com/sdougbrown/git-tend#configuration
+
+# Directories to scan for opted-in repos. A repo is opted in by placing a
+# .gittend file at its root. Tilde-expanded. Adjust to match your layout.
+roots = ` + rootsLine + `
+# roots = ["~/Code", "~/dev", "~/.dotfiles"]
+# roots = ["~/src", "~/work"]
+
+# How often to sync each repo.
+interval = "60s"
+
+# Log verbosity: debug, info, warn, error.
+log_level = "info"
+
+# How many days a repo can be stuck before 'git-tend greet' highlights it urgently.
+escalate_after_days = 3
+
+# Timeout for network operations (fetch, push).
+network_timeout = "30s"
+
+# Maximum backoff interval for repos that keep failing to reach the remote.
+offline_backoff_cap = "30m"
+
+# How many directory levels deep to search inside each root.
+scan_depth = 4
+`
+
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return fmt.Errorf("writing config %s: %w", path, err)
+	}
+	return nil
 }
 
 func Parse(path string) (*Config, error) {

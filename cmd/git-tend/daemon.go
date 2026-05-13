@@ -27,6 +27,9 @@ var daemonCmd = &cobra.Command{
 func runDaemon(cmd *cobra.Command, args []string) error {
 	configDir := paths.ConfigDir()
 	configPath := filepath.Join(configDir, "config.toml")
+	if err := config.WriteDefaultConfig(configPath, nil); err != nil {
+		return fmt.Errorf("seeding default config: %w", err)
+	}
 	userCfg, err := config.ParseUserConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("loading user config: %w", err)

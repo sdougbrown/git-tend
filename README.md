@@ -53,6 +53,8 @@ git-tend install
 
 On macOS this writes a launchd plist to `~/Library/LaunchAgents/com.dbrown.gittend.plist` and loads it. On Linux it writes a systemd user unit to `~/.config/systemd/user/git-tend.service` and enables it.
 
+If `~/.config/git-tend/config.toml` doesn't exist, `install` writes a commented template. When stdin is a TTY it first prompts for which directories to scan (default `~/Code`, comma-separated for multiple). When run non-interactively (CI, piped install) it skips the prompt and writes the default. Either way the config path is printed so you can edit it.
+
 The binary is expected at `~/.local/bin/git-tend`. If you put it somewhere else, edit the generated service file before loading.
 
 To remove the service:
@@ -150,11 +152,11 @@ Pass `--shell zsh` (or `bash` or `fish`) to override auto-detection. Use `--dry-
 
 ### Global config (`~/.config/git-tend/config.toml`)
 
-Controls which directories the daemon scans and how it behaves overall. Created automatically with defaults if absent.
+Controls which directories the daemon scans and how it behaves overall. Created on first `git-tend install` (with a prompt for roots when run interactively) or on first daemon start. The default roots are intentionally minimal — `~/Code` — to avoid scanning unexpected parts of your home directory; add the directories that match your layout.
 
 ```toml
 # Directories to scan for opted-in repos. Tilde-expanded.
-roots = ["~/Code", "~/.dotfiles", "~/.botfiles"]
+roots = ["~/Code"]
 
 # How often to sync each repo.
 interval = "60s"
