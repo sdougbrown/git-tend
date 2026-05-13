@@ -103,6 +103,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 					d.mu.Unlock()
 				}
 				d.rescanRoots()
+				d.writeStatus()
 			case syscall.SIGINT, syscall.SIGTERM:
 				d.logger.Info("shutting down", "signal", sig.String())
 				d.writeStatus()
@@ -146,6 +147,17 @@ func (d *Daemon) rescanRoots() {
 		if !currentRepos[path] {
 			delete(d.repoStatus, path)
 		}
+	}
+
+	for _, r := range d.repos {
+		if _, exists := d.repoStatus[r.Path]; exists {
+			continue
+		}
+		rs := status.RepoStatus{CurrentState: "pending"}
+		if r.Config != nil {
+			rs.Mode = r.Config.Mode
+		}
+		d.repoStatus[r.Path] = rs
 	}
 
 	d.logger.Info("scan complete", "repos", len(d.repos))

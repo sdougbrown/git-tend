@@ -101,7 +101,7 @@ REPO                                     MODE STATE    LAST SYNC    AHEAD      B
 /Users/you/.dotfiles                     ro   ok       12s ago      0          0
 ```
 
-State is `ok`, `stuck`, `offline`, or `snoozed`. Mode is `ro` (read-only) or `rw` (read-write).
+State is `pending`, `ok`, `stuck`, `offline`, or `snoozed`. `pending` means the daemon has discovered the repo but hasn't synced it yet (you'll see this briefly after `git-tend install`, `restart`, or `reload`). Mode is `ro` (read-only) or `rw` (read-write).
 
 **Step 3: If a repo goes stuck, see why.**
 
