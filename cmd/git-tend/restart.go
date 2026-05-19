@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,7 +32,7 @@ a fresh daemon process. Does not fetch or rebuild — that's on you.`,
 func runRestart(cmd *cobra.Command, args []string) error {
 	pidPath := filepath.Join(paths.StateDir(), "daemon.pid")
 	oldPid, err := readDaemonPid(pidPath)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 
@@ -79,7 +80,7 @@ func readDaemonPid(path string) (int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, fmt.Errorf("pid file missing at %s", path)
+			return 0, err
 		}
 		return 0, fmt.Errorf("reading pid file %s: %w", path, err)
 	}

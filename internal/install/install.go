@@ -51,7 +51,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%%h/.local/bin/git-tend daemon
+ExecStart=%h/.local/bin/git-tend daemon
 Restart=on-failure
 RestartSec=5
 
