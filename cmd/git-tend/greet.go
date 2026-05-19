@@ -33,6 +33,9 @@ func runGreet(cmd *cobra.Command, args []string) error {
 	}
 
 	stateDir := paths.StateDir()
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return fmt.Errorf("creating state dir: %w", err)
+	}
 
 	greetLastPath := filepath.Join(stateDir, "greet.last")
 	today := time.Now().Format("2006-01-02")

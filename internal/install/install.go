@@ -12,12 +12,16 @@ import (
 func IsMacOS() bool { return runtime.GOOS == "darwin" }
 func IsLinux() bool  { return runtime.GOOS == "linux" }
 
+const (
+	LaunchdLabel = "com.dougthings.gittend"
+)
+
 const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.dbrown.gittend</string>
+    <string>` + LaunchdLabel + `</string>
     <key>ProgramArguments</key>
     <array>
         <string>%s</string>
@@ -60,7 +64,7 @@ func launchdPlistPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "Library", "LaunchAgents", "com.dbrown.gittend.plist"), nil
+	return filepath.Join(home, "Library", "LaunchAgents", LaunchdLabel+".plist"), nil
 }
 
 func systemdUnitPath() (string, error) {
@@ -119,6 +123,9 @@ func LoadService() error {
 		return exec.Command("launchctl", "load", plistPath).Run()
 	}
 	if IsLinux() {
+		if err := exec.Command("systemctl", "--user", "daemon-reload").Run(); err != nil {
+			return err
+		}
 		return exec.Command("systemctl", "--user", "enable", "--now", "git-tend").Run()
 	}
 	return fmt.Errorf("unsupported platform: %s", runtime.GOOS)

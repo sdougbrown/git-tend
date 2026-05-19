@@ -30,7 +30,7 @@ func TestWriteLaunchdPlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	for _, want := range []string{"com.dbrown.gittend", "KeepAlive", "RunAtLoad"} {
+	for _, want := range []string{LaunchdLabel, "KeepAlive", "RunAtLoad"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("plist missing %q", want)
 		}
