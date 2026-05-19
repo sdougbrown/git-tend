@@ -90,6 +90,22 @@ func TestPIDRefusal(t *testing.T) {
 	}
 }
 
+func TestIsOwnProcess(t *testing.T) {
+	if !isOwnProcess(os.Getpid()) {
+		t.Error("isOwnProcess(os.Getpid()) should return true")
+	}
+
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+
+	if isOwnProcess(cmd.Process.Pid) {
+		t.Errorf("isOwnProcess(%d) should return false for a non-git-tend process", cmd.Process.Pid)
+	}
+}
+
 func TestDaemonTickIntegration(t *testing.T) {
 	tempRoot := t.TempDir()
 

@@ -1,15 +1,17 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/sdougbrown/git-tend/internal/install"
 	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
@@ -19,10 +21,9 @@ func init() {
 
 var restartCmd = &cobra.Command{
 	Use:   "restart",
-	Short: "Stop the running daemon and let the service manager respawn it",
-	Long: `Send SIGTERM to the running daemon. The service manager (launchd on macOS,
-systemd on Linux) respawns it against whatever binary the symlink/service file
-points to. Use this after rebuilding to pick up new code, or any time you want
+	Short: "Restart the daemon via the service manager",
+	Long: `Restart the running daemon via systemd (Linux) or launchd (macOS).
+Use this after rebuilding to pick up a new binary, or any time you want
 a fresh daemon process. Does not fetch or rebuild — that's on you.`,
 	RunE: runRestart,
 }
@@ -30,18 +31,29 @@ a fresh daemon process. Does not fetch or rebuild — that's on you.`,
 func runRestart(cmd *cobra.Command, args []string) error {
 	pidPath := filepath.Join(paths.StateDir(), "daemon.pid")
 	oldPid, err := readDaemonPid(pidPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
-	proc, err := os.FindProcess(oldPid)
-	if err != nil {
-		return fmt.Errorf("finding process %d: %w", oldPid, err)
+	var smErr error
+	switch {
+	case install.IsMacOS():
+		smErr = exec.Command("launchctl", "kickstart", "-kp", install.LaunchdLabel).Run()
+	case install.IsLinux():
+		smErr = exec.Command("systemctl", "--user", "restart", "git-tend").Run()
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		return fmt.Errorf("sending SIGTERM to pid %d: %w", oldPid, err)
+
+	if smErr != nil {
+		return fmt.Errorf("service manager restart failed: %w (is the service loaded? try 'git-tend install')", smErr)
 	}
-	fmt.Printf("sent SIGTERM to pid %d, waiting for respawn...\n", oldPid)
+
+	if oldPid > 0 {
+		fmt.Printf("restarting daemon (was pid %d)...\n", oldPid)
+	} else {
+		fmt.Println("restarting daemon...")
+	}
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -60,14 +72,14 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	return fmt.Errorf("daemon did not respawn within 10s — is the service loaded? try 'git-tend install'")
+	return fmt.Errorf("daemon did not come back within 10s — is the service loaded? try 'git-tend install'")
 }
 
 func readDaemonPid(path string) (int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, fmt.Errorf("daemon not running (pid file missing at %s)", path)
+		if os.IsNotExist(err) {
+			return 0, fmt.Errorf("pid file missing at %s", path)
 		}
 		return 0, fmt.Errorf("reading pid file %s: %w", path, err)
 	}

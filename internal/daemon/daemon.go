@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -123,13 +126,42 @@ func (d *Daemon) acquirePID() error {
 		var existingPID int
 		fmt.Sscanf(string(data), "%d", &existingPID)
 		if existingPID > 0 {
-			if err := syscall.Kill(existingPID, 0); err == nil {
+			if err := syscall.Kill(existingPID, 0); err == nil && isOwnProcess(existingPID) {
 				return fmt.Errorf("daemon already running, pid=%d", existingPID)
 			}
 		}
 	}
 
 	return os.WriteFile(d.pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
+}
+
+// isOwnProcess checks whether pid belongs to a git-tend daemon.
+//
+// There is a narrow TOCTOU window after the caller's preceding Kill(pid, 0)
+// succeeds: the process could exit and its PID be recycled before we read
+// /proc/<pid>/comm or run ps. In practice this is extremely unlikely for a
+// long-lived daemon and is an acceptable limitation of a simple pidfile scheme.
+func isOwnProcess(pid int) bool {
+	if pid == os.Getpid() {
+		return true
+	}
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+		if err != nil {
+			return false
+		}
+		return strings.TrimSpace(string(data)) == "git-tend"
+	case "darwin":
+		out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=").Output()
+		if err != nil {
+			return false
+		}
+		return filepath.Base(strings.TrimSpace(string(out))) == "git-tend"
+	default:
+		// Unknown platform: be conservative and treat any running PID as ours.
+		return true
+	}
 }
 
 func (d *Daemon) rescanRoots() {

@@ -53,7 +53,7 @@ Make sure `~/.local/bin` is on your `PATH`, then install the daemon service:
 git-tend install
 ```
 
-On macOS this writes a launchd plist to `~/Library/LaunchAgents/com.dbrown.gittend.plist` and loads it. On Linux it writes a systemd user unit to `~/.config/systemd/user/git-tend.service` and enables it.
+On macOS this writes a launchd plist to `~/Library/LaunchAgents/com.dougthings.gittend.plist` and loads it. On Linux it writes a systemd user unit to `~/.config/systemd/user/git-tend.service` and enables it.
 
 If `~/.config/git-tend/config.toml` doesn't exist, `install` writes a commented template. When stdin is a TTY it first prompts for which directories to scan (default `~/Code`, comma-separated for multiple). When run non-interactively (CI, piped install) it skips the prompt and writes the default. Either way the config path is printed so you can edit it.
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
 )
 
@@ -17,7 +18,7 @@ func TestGreetDateStamp(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("NO_COLOR", "1")
 
-	stateDir := filepath.Join(tmpHome, "Library", "Application Support", "git-tend")
+	stateDir := paths.StateDir()
 	os.MkdirAll(stateDir, 0755)
 
 	configDir := filepath.Join(tmpHome, ".config", "git-tend")

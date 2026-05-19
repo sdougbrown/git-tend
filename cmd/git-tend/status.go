@@ -26,8 +26,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	stateDir := paths.StateDir()
 	sf := status.Read(filepath.Join(stateDir, "status.json"))
 
-	if sf == nil || len(sf.Repos) == 0 {
-		fmt.Println("No managed repos. Run 'git-tend daemon' first.")
+	if sf == nil {
+		fmt.Println("Daemon not running. Run 'git-tend install' or 'git-tend daemon'.")
+		return nil
+	}
+	if len(sf.Repos) == 0 {
+		fmt.Println("No managed repos found yet. If you just started the daemon, give it a minute to scan. Otherwise, make sure repos have a .gittend file inside them.")
 		return nil
 	}
 
