@@ -442,6 +442,20 @@ func TestSyncWithDebounce(t *testing.T) {
 	if result.State != "skipped" {
 		t.Fatalf("expected skipped, got %s: %s", result.State, result.Error)
 	}
+
+	manual := SyncManual(context.Background(), repo, cfg, stateDir)
+	if manual.State != "ok" {
+		t.Fatalf("manual sync should bypass debounce, got %s: %s", manual.State, manual.Error)
+	}
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	contents, err := os.ReadFile(filepath.Join(clone2, "recent.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(contents); got != "just modified" {
+		t.Errorf("remote recent.txt = %q, want committed manual change", got)
+	}
 }
 
 func TestSyncLockContentionSkips(t *testing.T) {

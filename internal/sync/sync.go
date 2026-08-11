@@ -27,6 +27,16 @@ type SyncResult struct {
 }
 
 func Sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir string) SyncResult {
+	return sync(ctx, repoPath, cfg, stateDir, false)
+}
+
+// SyncManual runs an explicit user-requested sync. Unlike periodic daemon
+// syncs, it does not defer read-write work for the debounce interval.
+func SyncManual(ctx context.Context, repoPath string, cfg *config.Config, stateDir string) SyncResult {
+	return sync(ctx, repoPath, cfg, stateDir, true)
+}
+
+func sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir string, bypassDebounce bool) SyncResult {
 	hash := sha256.Sum256([]byte(repoPath))
 	lockDir := filepath.Join(stateDir, "locks")
 	lockPath := filepath.Join(lockDir, hex.EncodeToString(hash[:])+".lock")
@@ -68,7 +78,7 @@ func Sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir str
 		return syncReadOnly(ctx, repoPath, timeout)
 	}
 
-	return syncReadWrite(ctx, repoPath, cfg, timeout)
+	return syncReadWrite(ctx, repoPath, cfg, timeout, bypassDebounce)
 }
 
 func parseIntervalTimeout(interval string) time.Duration {
@@ -108,7 +118,7 @@ func syncReadOnly(ctx context.Context, repoPath string, timeout time.Duration) S
 	return SyncResult{State: "ok"}
 }
 
-func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, timeout time.Duration) SyncResult {
+func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, timeout time.Duration, bypassDebounce bool) SyncResult {
 	debounceDur := parseDebounce(cfg.Debounce)
 
 	files, err := git.ListTrackedFiles(repoPath)
@@ -130,7 +140,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 			maxMtime = fi.ModTime()
 		}
 	}
-	if !maxMtime.IsZero() && now.Sub(maxMtime) < debounceDur {
+	if !bypassDebounce && !maxMtime.IsZero() && now.Sub(maxMtime) < debounceDur {
 		return SyncResult{State: "skipped", Error: "debounce"}
 	}
 

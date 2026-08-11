@@ -52,7 +52,13 @@ func ExpandPath(path string) string {
 			path = strings.Replace(path, "$HOME", home, 1)
 		}
 	}
-	return path
+
+	// Managed-repo state is keyed by paths found during scanning, which are
+	// absolute. Normalize CLI paths as well so `run .` updates that same entry.
+	if absolute, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(absolute)
+	}
+	return filepath.Clean(path)
 }
 
 func appSupportDir() string {
