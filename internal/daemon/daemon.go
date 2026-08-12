@@ -185,7 +185,7 @@ func (d *Daemon) rescanRoots() {
 		if _, exists := d.repoStatus[r.Path]; exists {
 			continue
 		}
-		rs := status.RepoStatus{CurrentState: "pending"}
+		rs := status.RepoStatus{CurrentState: "pending", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		if r.Config != nil {
 			rs.Mode = r.Config.Mode
 		}
@@ -218,6 +218,7 @@ func (d *Daemon) tick(ctx context.Context) {
 			rs.PriorState = rs.CurrentState
 			rs.CurrentState = "snoozed"
 			rs.SnoozedUntil = snoozedUntil.UTC().Format(time.RFC3339)
+			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 			d.repoStatus[repo.Path] = rs
 			d.mu.Unlock()
 			continue
@@ -239,6 +240,7 @@ func (d *Daemon) tick(ctx context.Context) {
 				if rs.StuckSince == "" {
 					rs.StuckSince = now.UTC().Format(time.RFC3339)
 				}
+				rs.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
 			}
 			d.repoStatus[repo.Path] = rs
 			d.mu.Unlock()
@@ -331,6 +333,9 @@ func (d *Daemon) tick(ctx context.Context) {
 			d.logger.Debug("repo skipped", "repo", repo.Path, "reason", result.Error)
 		}
 
+		if result.State != "skipped" {
+			rs.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+		}
 		d.repoStatus[repo.Path] = rs
 		d.mu.Unlock()
 
@@ -355,7 +360,7 @@ func (d *Daemon) writeStatus() {
 		Repos:           d.repoStatus,
 	}
 
-	if err := status.Write(filepath.Join(d.stateDir, "status.json"), sf); err != nil {
+	if err := status.MergeAndWrite(filepath.Join(d.stateDir, "status.json"), sf); err != nil {
 		d.logger.Error("writing status", "error", err)
 	}
 }

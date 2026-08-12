@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestReadMissing(t *testing.T) {
@@ -39,6 +40,36 @@ func TestWriteReadRoundtrip(t *testing.T) {
 	}
 	if rs, ok := read.Repos["/test/repo"]; !ok || rs.Mode != "read-write" {
 		t.Error("repo not found or wrong mode")
+	}
+}
+
+func TestMergeAndWritePreservesNewerForegroundResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	repo := "/test/repo"
+	old := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	manual := time.Now().UTC().Format(time.RFC3339Nano)
+
+	if err := Write(path, &StatusFile{Repos: map[string]RepoStatus{
+		repo: {CurrentState: "stuck", UpdatedAt: old},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateRepo(path, repo, func(rs RepoStatus) RepoStatus {
+		rs.CurrentState = "ok"
+		rs.UpdatedAt = manual
+		return rs
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MergeAndWrite(path, &StatusFile{Repos: map[string]RepoStatus{
+		repo: {CurrentState: "stuck", UpdatedAt: old},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := Read(path).Repos[repo].CurrentState; got != "ok" {
+		t.Errorf("state after stale daemon write = %q, want ok", got)
 	}
 }
 
