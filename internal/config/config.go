@@ -23,12 +23,13 @@ type Config struct {
 }
 
 type CommitConfig struct {
-	Strategy       string `toml:"strategy"`
-	Emoji          string `toml:"emoji"`
-	ModelCmd       string `toml:"model_cmd"`
-	ModelTimeout   string `toml:"model_timeout"`
-	FallbackThresh int    `toml:"model_fallback_threshold"`
-	NoVerify       bool   `toml:"no_verify"`
+	Strategy         string `toml:"strategy"`
+	Emoji            string `toml:"emoji"`
+	ModelCmd         string `toml:"model_cmd"`
+	ModelTimeout     string `toml:"model_timeout"`
+	FallbackThresh   int    `toml:"model_fallback_threshold"`
+	NoVerify         bool   `toml:"no_verify"`
+	InProgressWindow string `toml:"in_progress_window"`
 }
 
 type IncludeConfig struct {
@@ -241,6 +242,12 @@ func Parse(path string) (*Config, error) {
 	if cfg.Debounce != "" {
 		if _, err := time.ParseDuration(cfg.Debounce); err != nil {
 			return nil, fmt.Errorf("invalid debounce %q: %w", cfg.Debounce, err)
+		}
+	}
+
+	if cfg.Commit.InProgressWindow != "" {
+		if _, err := time.ParseDuration(cfg.Commit.InProgressWindow); err != nil {
+			return nil, fmt.Errorf("invalid commit in_progress_window %q: %w", cfg.Commit.InProgressWindow, err)
 		}
 	}
 

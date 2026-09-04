@@ -458,6 +458,61 @@ func TestSyncWithDebounce(t *testing.T) {
 	}
 }
 
+func TestSyncSkipCommitInProgress(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "0s", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Dirty a file so there is something to commit.
+	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("changes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an in-progress manual commit: git-tend's own setup commits
+	// always clear the sentinel, so write COMMIT_EDITMSG directly and leave it
+	// fresh.
+	gitDir := testGit(t, repo, "rev-parse", "--absolute-git-dir")
+	gitDir = strings.TrimSpace(gitDir)
+	if err := os.WriteFile(filepath.Join(gitDir, "COMMIT_EDITMSG"), []byte("draft message"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji:            "🐌",
+			InProgressWindow: "10m",
+		},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" {
+		t.Fatalf("expected skipped, got %s: %s", result.State, result.Error)
+	}
+
+	// The change must not have been committed/pushed.
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "work.txt")); err == nil {
+		t.Error("work.txt should NOT be committed while a commit is in progress")
+	}
+}
+
 func TestSyncLockContentionSkips(t *testing.T) {
 	remote := gitInitBare(t)
 	defer os.RemoveAll(remote)

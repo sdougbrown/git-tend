@@ -3,8 +3,74 @@ package git
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestCommitEditRecent(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgPath := filepath.Join(gitDir, "COMMIT_EDITMSG")
+
+	// No file yet: never recent.
+	if recent, err := CommitEditRecent(repo, time.Hour); err != nil || recent {
+		t.Fatalf("absent file should not be recent (recent=%v err=%v)", recent, err)
+	}
+
+	// Written just now within a 1s window.
+	if err := os.WriteFile(msgPath, []byte("draft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if recent, err := CommitEditRecent(repo, time.Hour); err != nil || !recent {
+		t.Fatalf("fresh file should be recent (recent=%v err=%v)", recent, err)
+	}
+
+	// Stale beyond the window.
+	past := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(msgPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if recent, err := CommitEditRecent(repo, time.Minute); err != nil || recent {
+		t.Fatalf("stale file should not be recent (recent=%v err=%v)", recent, err)
+	}
+}
+
+func TestActiveLocks(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if locks, err := ActiveLocks(repo); err != nil || locks {
+		t.Fatalf("clean repo should have no locks (locks=%v err=%v)", locks, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(gitDir, "index.lock"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if locks, err := ActiveLocks(repo); err != nil || !locks {
+		t.Fatalf("index.lock should be detected (locks=%v err=%v)", locks, err)
+	}
+}
+
+func run(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
 
 func TestIsNetworkError(t *testing.T) {
 	tests := []struct {
