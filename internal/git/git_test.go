@@ -105,6 +105,34 @@ func TestActiveLocks(t *testing.T) {
 	if locks, err := ActiveLocks(repo); err != nil || !locks {
 		t.Fatalf("index.lock should be detected (locks=%v err=%v)", locks, err)
 	}
+
+	// Locks also appear in subdirectories, e.g. refs/heads/<branch>.lock.
+	refsHeads := filepath.Join(gitDir, "refs", "heads")
+	if err := os.MkdirAll(refsHeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(gitDir, "index.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refsHeads, "main.lock"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if locks, err := ActiveLocks(repo); err != nil || !locks {
+		t.Fatalf("refs/heads/main.lock should be detected (locks=%v err=%v)", locks, err)
+	}
+
+	// Non-lock files must not trigger detection.
+	if err := os.Remove(filepath.Join(refsHeads, "main.lock")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"foo.locks", "xlock", "COMMIT_EDITMSG"} {
+		if err := os.WriteFile(filepath.Join(gitDir, name), nil, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if locks, err := ActiveLocks(repo); err != nil || locks {
+		t.Fatalf("non-lock files should not be detected (locks=%v err=%v)", locks, err)
+	}
 }
 
 func run(t *testing.T, dir string, args ...string) string {

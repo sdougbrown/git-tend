@@ -119,6 +119,11 @@ func ActiveLocks(repoPath string) (bool, error) {
 			return err
 		}
 		if d.IsDir() {
+			// objects/ and logs/ are the bulk of a large .git and never hold
+			// lock files; skipping them keeps the per-tick scan cheap.
+			if d.Name() == "objects" || d.Name() == "logs" {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if strings.HasSuffix(d.Name(), ".lock") {

@@ -209,7 +209,9 @@ emoji = "🐌"
 #
 # Trade-off: because the file lingers after a finished commit too, enabling this
 # also leaves a quiet window after any manual commit before auto-commit resumes.
-# Leave unset (default) to keep the previous always-commit behavior.
+# Leave unset (default) to skip only the COMMIT_EDITMSG back-off; git-tend
+# always skips auto-commit while a git lock file (e.g. index.lock) is present,
+# whether or not this option is set.
 in_progress_window = "5m"
 
 # Commit strategy. Currently only the default (heuristic) strategy is used.

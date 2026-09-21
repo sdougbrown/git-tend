@@ -501,8 +501,8 @@ func TestSyncSkipCommitInProgress(t *testing.T) {
 	}
 
 	result := Sync(context.Background(), repo, cfg, stateDir)
-	if result.State != "skipped" {
-		t.Fatalf("expected skipped, got %s: %s", result.State, result.Error)
+	if result.State != "skipped" || result.Error != "commit in progress" {
+		t.Fatalf("expected skipped (commit in progress), got %s: %s", result.State, result.Error)
 	}
 
 	// The change must not have been committed/pushed.
@@ -554,8 +554,8 @@ func TestSyncGitLockSkips(t *testing.T) {
 	}
 
 	result := Sync(context.Background(), repo, cfg, stateDir)
-	if result.State != "skipped" {
-		t.Fatalf("expected skipped, got %s: %s", result.State, result.Error)
+	if result.State != "skipped" || result.Error != "git lock present (concurrent operation)" {
+		t.Fatalf("expected skipped (git lock present), got %s: %s", result.State, result.Error)
 	}
 
 	// The change must not have been committed/pushed.
@@ -563,6 +563,107 @@ func TestSyncGitLockSkips(t *testing.T) {
 	defer os.RemoveAll(clone2)
 	if _, err := os.Stat(filepath.Join(clone2, "work.txt")); err == nil {
 		t.Error("work.txt should NOT be committed while a git lock is present")
+	}
+}
+
+// Simulates git-tend's own auto-commit backing off against itself. git commit
+// writes a fresh COMMIT_EDITMSG, so without the post-commit clear the next tick
+// with a window set would skip on its own sentinel.
+func TestSyncDoesNotBackOffAgainstOwnCommit(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "0s", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("changes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+	}
+
+	ctx := context.Background()
+	if result := Sync(ctx, repo, cfg, stateDir); result.State != "ok" {
+		t.Fatalf("first sync expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	// The auto-commit left a fresh COMMIT_EDITMSG (cleared by git-tend, but if
+	// the clear regresses this window now applies to git-tend's own commit).
+	cfg.Commit.InProgressWindow = "10m"
+	result := Sync(ctx, repo, cfg, stateDir)
+	if result.State == "skipped" && result.Error == "commit in progress" {
+		t.Fatal("second tick backed off against git-tend's own commit; ClearCommitEditMsg regressed")
+	}
+	if result.State != "ok" {
+		t.Fatalf("second sync expected ok, got %s: %s", result.State, result.Error)
+	}
+}
+
+func TestSyncStaleCommitEditMsgProceeds(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "0s", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("changes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stale sentinel (older than the window) must not cause a skip.
+	gitDir := testGit(t, repo, "rev-parse", "--absolute-git-dir")
+	gitDir = strings.TrimSpace(gitDir)
+	msgPath := filepath.Join(gitDir, "COMMIT_EDITMSG")
+	if err := os.WriteFile(msgPath, []byte("old draft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(msgPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji:            "🐌",
+			InProgressWindow: "10m",
+		},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok with stale COMMIT_EDITMSG, got %s: %s", result.State, result.Error)
 	}
 }
 
@@ -590,6 +691,7 @@ func TestSyncLockContentionSkips(t *testing.T) {
 	lockPath := filepath.Join(lockDir, hex.EncodeToString(hash[:])+".lock")
 
 	ready := make(chan struct{})
+	release := make(chan struct{})
 	done := make(chan struct{})
 
 	go func() {
@@ -606,7 +708,9 @@ func TestSyncLockContentionSkips(t *testing.T) {
 			return
 		}
 		close(ready)
-		time.Sleep(3 * time.Second)
+		// Hold the lock until the assertions are done; a fixed sleep would
+		// flake if the test goroutine is descheduled past the deadline.
+		<-release
 		unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		close(done)
 	}()
@@ -620,9 +724,10 @@ func TestSyncLockContentionSkips(t *testing.T) {
 	}
 
 	result := Sync(context.Background(), repo, cfg, stateDir)
-	if result.State != "skipped" {
-		t.Fatalf("expected skipped, got %s: %s", result.State, result.Error)
+	if result.State != "skipped" || result.Error != "locked" {
+		t.Fatalf("expected skipped (locked), got %s: %s", result.State, result.Error)
 	}
 
+	close(release)
 	<-done
 }
