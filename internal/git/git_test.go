@@ -42,6 +42,51 @@ func TestCommitEditRecent(t *testing.T) {
 	}
 }
 
+func TestGitDir(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatalf("expected git dir in repo, got error: %v", err)
+	}
+	if fi, err := os.Stat(gitDir); err != nil || !fi.IsDir() {
+		t.Fatalf("GitDir returned %q, want an existing directory", gitDir)
+	}
+
+	// Outside any repository the underlying git command must fail.
+	notARepo := t.TempDir()
+	if _, err := GitDir(notARepo); err == nil {
+		t.Fatal("expected error for a path that is not a git repository")
+	}
+}
+
+func TestClearCommitEditMsg(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgPath := filepath.Join(gitDir, "COMMIT_EDITMSG")
+
+	// Removing an absent sentinel is a no-op.
+	if err := ClearCommitEditMsg(repo); err != nil {
+		t.Fatalf("clear with no COMMIT_EDITMSG should succeed, got %v", err)
+	}
+
+	// Removing an existing sentinel deletes the file.
+	if err := os.WriteFile(msgPath, []byte("draft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearCommitEditMsg(repo); err != nil {
+		t.Fatalf("clear with COMMIT_EDITMSG should succeed, got %v", err)
+	}
+	if _, err := os.Stat(msgPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("COMMIT_EDITMSG should be gone after clear, stat err=%v", err)
+	}
+}
+
 func TestActiveLocks(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "init", "-q")
