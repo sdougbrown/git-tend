@@ -121,6 +121,25 @@ func syncReadOnly(ctx context.Context, repoPath string, timeout time.Duration) S
 func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, timeout time.Duration, bypassDebounce bool) SyncResult {
 	debounceDur := parseDebounce(cfg.Debounce)
 
+	// Back off if git appears busy, so we don't tend the repo out from under a
+	// concurrent manual operation. Locks appear while a git command is
+	// mid-write; a recently-written COMMIT_EDITMSG means the user is likely
+	// composing a commit message in an editor right now (git holds no lock
+	// during that phase).
+	if locks, err := git.ActiveLocks(repoPath); err != nil {
+		return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for active git locks: %v", err)}
+	} else if locks {
+		return SyncResult{State: "skipped", Error: "git lock present (concurrent operation)"}
+	}
+	if cfg.Commit.InProgressWindow != "" {
+		window := parseDebounce(cfg.Commit.InProgressWindow)
+		if recent, err := git.CommitEditRecent(repoPath, window); err != nil {
+			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking commit in progress: %v", err)}
+		} else if recent {
+			return SyncResult{State: "skipped", Error: "commit in progress"}
+		}
+	}
+
 	files, err := git.ListTrackedFiles(repoPath)
 	if err != nil {
 		return SyncResult{State: "stuck", Error: fmt.Sprintf("listing tracked files: %v", err)}
@@ -190,6 +209,10 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 			writeStuck(repoPath, "hook_failed", "git commit", exitCodeFromErr(err), err.Error())
 			return SyncResult{State: "stuck", Error: fmt.Sprintf("commit: %v", err)}
 		}
+		// The sentinel git writes for manual commits is only meaningful for
+		// human activity; clear it after our own commit so we don't back off
+		// against ourselves on the next tick.
+		_ = git.ClearCommitEditMsg(repoPath)
 	}
 
 	stdout, stderr, err, isNet := git.PullRebase(ctx, repoPath, timeout)

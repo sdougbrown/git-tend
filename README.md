@@ -201,6 +201,19 @@ debounce = "30s"
 # Prefix emoji on generated commit messages. Default: 🐌
 emoji = "🐌"
 
+# Skip the auto-commit when a manual commit appears to be in progress. When
+# composing a commit message by hand (e.g. in vim), git writes .git/COMMIT_EDITMSG
+# and leaves it around — and holds no lock while your editor is open — so git-tend
+# can't detect the editor directly. Instead it backs off committing for this
+# window of time after COMMIT_EDITMSG was last touched.
+#
+# Trade-off: because the file lingers after a finished commit too, enabling this
+# also leaves a quiet window after any manual commit before auto-commit resumes.
+# Leave unset (default) to skip only the COMMIT_EDITMSG back-off; git-tend
+# always skips auto-commit while a git lock file (e.g. index.lock) is present,
+# whether or not this option is set.
+in_progress_window = "5m"
+
 # Commit strategy. Currently only the default (heuristic) strategy is used.
 strategy = ""
 

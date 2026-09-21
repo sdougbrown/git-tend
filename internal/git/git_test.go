@@ -3,8 +3,147 @@ package git
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestCommitEditRecent(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgPath := filepath.Join(gitDir, "COMMIT_EDITMSG")
+
+	// No file yet: never recent.
+	if recent, err := CommitEditRecent(repo, time.Hour); err != nil || recent {
+		t.Fatalf("absent file should not be recent (recent=%v err=%v)", recent, err)
+	}
+
+	// Written just now within a 1s window.
+	if err := os.WriteFile(msgPath, []byte("draft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if recent, err := CommitEditRecent(repo, time.Hour); err != nil || !recent {
+		t.Fatalf("fresh file should be recent (recent=%v err=%v)", recent, err)
+	}
+
+	// Stale beyond the window.
+	past := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(msgPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if recent, err := CommitEditRecent(repo, time.Minute); err != nil || recent {
+		t.Fatalf("stale file should not be recent (recent=%v err=%v)", recent, err)
+	}
+}
+
+func TestGitDir(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatalf("expected git dir in repo, got error: %v", err)
+	}
+	if fi, err := os.Stat(gitDir); err != nil || !fi.IsDir() {
+		t.Fatalf("GitDir returned %q, want an existing directory", gitDir)
+	}
+
+	// Outside any repository the underlying git command must fail.
+	notARepo := t.TempDir()
+	if _, err := GitDir(notARepo); err == nil {
+		t.Fatal("expected error for a path that is not a git repository")
+	}
+}
+
+func TestClearCommitEditMsg(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgPath := filepath.Join(gitDir, "COMMIT_EDITMSG")
+
+	// Removing an absent sentinel is a no-op.
+	if err := ClearCommitEditMsg(repo); err != nil {
+		t.Fatalf("clear with no COMMIT_EDITMSG should succeed, got %v", err)
+	}
+
+	// Removing an existing sentinel deletes the file.
+	if err := os.WriteFile(msgPath, []byte("draft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearCommitEditMsg(repo); err != nil {
+		t.Fatalf("clear with COMMIT_EDITMSG should succeed, got %v", err)
+	}
+	if _, err := os.Stat(msgPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("COMMIT_EDITMSG should be gone after clear, stat err=%v", err)
+	}
+}
+
+func TestActiveLocks(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	gitDir, err := GitDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if locks, err := ActiveLocks(repo); err != nil || locks {
+		t.Fatalf("clean repo should have no locks (locks=%v err=%v)", locks, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(gitDir, "index.lock"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if locks, err := ActiveLocks(repo); err != nil || !locks {
+		t.Fatalf("index.lock should be detected (locks=%v err=%v)", locks, err)
+	}
+
+	// Locks also appear in subdirectories, e.g. refs/heads/<branch>.lock.
+	refsHeads := filepath.Join(gitDir, "refs", "heads")
+	if err := os.MkdirAll(refsHeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(gitDir, "index.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refsHeads, "main.lock"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if locks, err := ActiveLocks(repo); err != nil || !locks {
+		t.Fatalf("refs/heads/main.lock should be detected (locks=%v err=%v)", locks, err)
+	}
+
+	// Non-lock files must not trigger detection.
+	if err := os.Remove(filepath.Join(refsHeads, "main.lock")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"foo.locks", "xlock", "COMMIT_EDITMSG"} {
+		if err := os.WriteFile(filepath.Join(gitDir, name), nil, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if locks, err := ActiveLocks(repo); err != nil || locks {
+		t.Fatalf("non-lock files should not be detected (locks=%v err=%v)", locks, err)
+	}
+}
+
+func run(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
 
 func TestIsNetworkError(t *testing.T) {
 	tests := []struct {
