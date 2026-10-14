@@ -74,14 +74,21 @@ func initRepoWithRemote(t *testing.T, repoDir, remote, mode, debounce, extraFile
 	}
 }
 
-func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
+// setupStuckAgentRepo builds a read-write repo with a failing pre-commit
+// hook and an agent configured to fail (exit 1), plus a daemon watching it.
+// The first tick marks the repo stuck (hook_failed) and runs the failing
+// agent. Returns the repo path, the agent's marker file, the pre-commit
+// hook path, the daemon's state dir, and the daemon.
+func setupStuckAgentRepo(t *testing.T) (repoDir, marker, hookPath, stateDir string, d *Daemon) {
+	t.Helper()
+
 	tempRoot := t.TempDir()
 	remote := setupBareRemote(t)
-	repoDir := filepath.Join(tempRoot, "agent-repo")
+	repoDir = filepath.Join(tempRoot, "agent-repo")
 
 	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
 
-	marker := filepath.Join(t.TempDir(), "marker")
+	marker = filepath.Join(t.TempDir(), "marker")
 	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
 	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(agentCfg), 0644); err != nil {
 		t.Fatal(err)
@@ -93,7 +100,7 @@ func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
 	// Install the failing pre-commit hook only after committing the config,
 	// or the commit itself would trip it. It makes the daemon's commit
 	// attempt mark the repo stuck with reason hook_failed.
-	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	hookPath = filepath.Join(repoDir, ".git", "hooks", "pre-commit")
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -104,10 +111,16 @@ func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
 		ScanDepth:      2,
 		NetworkTimeout: "5s",
 	}
-	stateDir := t.TempDir()
+	stateDir = t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d = New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
 	d.rescanRoots()
+
+	return repoDir, marker, hookPath, stateDir, d
+}
+
+func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
+	repoDir, marker, hookPath, stateDir, d := setupStuckAgentRepo(t)
 
 	ctx := context.Background()
 
@@ -168,36 +181,7 @@ func countMarkerRuns(marker string) int {
 }
 
 func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
-	tempRoot := t.TempDir()
-	remote := setupBareRemote(t)
-	repoDir := filepath.Join(tempRoot, "agent-repo")
-
-	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
-
-	marker := filepath.Join(t.TempDir(), "marker")
-	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
-	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(agentCfg), 0644); err != nil {
-		t.Fatal(err)
-	}
-	testGitOK(t, repoDir, "add", ".gittend")
-	testGitOK(t, repoDir, "commit", "-m", "agent config")
-	testGitOK(t, repoDir, "push", "-u", "origin", "main")
-
-	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
-	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.UserConfig{
-		Roots:          []string{tempRoot},
-		Interval:       "1s",
-		ScanDepth:      2,
-		NetworkTimeout: "5s",
-	}
-	stateDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
-	d.rescanRoots()
+	repoDir, _, _, stateDir, d := setupStuckAgentRepo(t)
 
 	ctx := context.Background()
 
@@ -243,36 +227,7 @@ func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
 // so without the bump in maybeRunAgent the merge keeps the stale on-disk
 // budget and the display freezes at 1/2.
 func TestDaemonTickAgentBudgetReachesCapOnDisk(t *testing.T) {
-	tempRoot := t.TempDir()
-	remote := setupBareRemote(t)
-	repoDir := filepath.Join(tempRoot, "agent-repo")
-
-	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
-
-	marker := filepath.Join(t.TempDir(), "marker")
-	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
-	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(agentCfg), 0644); err != nil {
-		t.Fatal(err)
-	}
-	testGitOK(t, repoDir, "add", ".gittend")
-	testGitOK(t, repoDir, "commit", "-m", "agent config")
-	testGitOK(t, repoDir, "push", "-u", "origin", "main")
-
-	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
-	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.UserConfig{
-		Roots:          []string{tempRoot},
-		Interval:       "1s",
-		ScanDepth:      2,
-		NetworkTimeout: "5s",
-	}
-	stateDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
-	d.rescanRoots()
+	repoDir, _, _, stateDir, d := setupStuckAgentRepo(t)
 
 	ctx := context.Background()
 
