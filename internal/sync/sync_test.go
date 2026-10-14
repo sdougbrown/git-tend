@@ -789,7 +789,7 @@ func TestSyncAgentStrategyUsesAgent(t *testing.T) {
 	log := runSyncCommitTest(t, config.CommitConfig{
 		Emoji:    "🐌",
 		Strategy: "agent",
-		ModelCmd: `if [ "$(grep -c -e '^repo:' -e 'Output only the message text itself')" -ge 2 ]; then echo 'agent wrote this subject'; else echo 'agent stdin missing repo context or default prompt'; fi`,
+		ModelCmd: `if [ "$(grep -c -e '^repo: /' -e '^branch: main$' -e 'Output only the message text itself')" -ge 3 ]; then echo 'agent wrote this subject'; else echo 'agent stdin missing repo/branch context or default prompt'; fi`,
 	}, dirtyAcrossDirs)
 	if !strings.Contains(log, "agent wrote this subject") {
 		t.Errorf("expected agent message in log, got:\n%s", log)
@@ -813,12 +813,14 @@ func TestSyncAgentStrategyPassesMultiLineMessage(t *testing.T) {
 func TestSyncAgentStrategyReceivesFullDiff(t *testing.T) {
 	// The agent runs after staging, so its stdin must carry the full cached
 	// diff — this pins the ordering: debounce/lock checks, then git add,
-	// then the agent. The '^repo:' and default-prompt greps are the
-	// agent-only part of the stdin payload: the non-agent fallthrough path
-	// sends the full diff alone, so this test fails if the agent branch is
-	// ever bypassed. One grep pass with a match count, because two
+	// then the agent. The '^repo: /', '^branch: main$', and default-prompt
+	// greps are the agent-only part of the stdin payload: the non-agent
+	// fallthrough path sends the full diff alone, so this test fails if the
+	// agent branch is ever bypassed. The repo value is a temp path (not
+	// deterministic), so it is asserted as an absolute-path prefix; the branch
+	// value is asserted exactly. One grep pass with a match count, because two
 	// sequential greps on the same pipe would race over buffered input.
-	agentCmd := `if [ "$(grep -c -e '^repo:' -e '^diff --git' -e 'Output only the message text itself')" -ge 3 ]; then echo 'agent saw full diff'; else echo 'agent stdin incomplete'; fi`
+	agentCmd := `if [ "$(grep -c -e '^repo: /' -e '^branch: main$' -e '^diff --git' -e 'Output only the message text itself')" -ge 4 ]; then echo 'agent saw full diff'; else echo 'agent stdin incomplete'; fi`
 	log := runSyncCommitTest(t, config.CommitConfig{
 		Emoji:    "🐌",
 		Strategy: "agent",
