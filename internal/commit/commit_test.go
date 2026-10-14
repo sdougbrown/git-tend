@@ -201,3 +201,103 @@ func TestGenerateWithModelBelowThreshold(t *testing.T) {
 		t.Errorf("expected deterministic message, got %q", result)
 	}
 }
+
+func TestGenerateModelFirst(t *testing.T) {
+	// The heuristic message here is informative ("update src/ (2 files)"),
+	// but the model strategy consults the model regardless.
+	diff := "M\tsrc/a.go\nM\tsrc/b.go"
+
+	result := GenerateModelFirst(diff, "🐌", 3, "echo 'refactor the parser'", 30*time.Second, "fake stdin\n")
+
+	if result != "🐌 refactor the parser" {
+		t.Errorf("expected model output, got %q", result)
+	}
+}
+
+func TestGenerateModelFirstFallbackOnError(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tsrc/b.go"
+
+	result := GenerateModelFirst(diff, "🐌", 3, "exit 1", 5*time.Second, "fake stdin\n")
+
+	if !strings.HasPrefix(result, "🐌 update src/") {
+		t.Errorf("expected fallback to heuristic, got %q", result)
+	}
+}
+
+func TestGenerateModelFirstFallbackOnEmptyOutput(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tsrc/b.go"
+
+	result := GenerateModelFirst(diff, "🐌", 3, "true", 5*time.Second, "fake stdin\n")
+
+	if !strings.HasPrefix(result, "🐌 update src/") {
+		t.Errorf("expected fallback to heuristic, got %q", result)
+	}
+}
+
+func TestGenerateModelFirstReceivesStdin(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tsrc/b.go"
+	modelStdin := "M\tsrc/a.go\n\n" + DefaultModelPrompt
+
+	// The command echoes back whether the expected prompt text reached stdin.
+	modelCmd := "if grep -q 'name-status listing'; then echo 'stdin has prompt'; else echo 'stdin missing prompt'; fi"
+	result := GenerateModelFirst(diff, "🐌", 3, modelCmd, 30*time.Second, modelStdin)
+
+	if result != "🐌 stdin has prompt" {
+		t.Errorf("expected composed stdin with prompt, got %q", result)
+	}
+}
+
+func TestGenerateModelFirstKeepsModelEmoji(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tsrc/b.go"
+
+	result := GenerateModelFirst(diff, "🐌", 3, "echo '📝 fix the parser'", 30*time.Second, "fake stdin\n")
+
+	if result != "📝 fix the parser" {
+		t.Errorf("expected model emoji kept as-is, got %q", result)
+	}
+}
+
+func TestGenerateWithModelKeepsModelEmoji(t *testing.T) {
+	diff := "M\tsrc/a.go\nM\tlib/b.go\nM\tcmd/c.go\nM\tpkg/d.go\nM\tinternal/e.go\nM\ttest/f.go\nM\tdocs/g.go"
+
+	result := GenerateWithModel(diff, "🐌", 3, "echo '📝 fix the parser'", 30*time.Second, "fake full diff\n")
+
+	if result != "📝 fix the parser" {
+		t.Errorf("expected model emoji kept as-is, got %q", result)
+	}
+}
+
+func TestGenerateWithModelInlinePromptCommand(t *testing.T) {
+	// Backward compat: a model_cmd carrying its own inline prompt gets the
+	// stdin payload passed through untouched — no prompt appended.
+	diff := "M\tsrc/a.go\nM\tlib/b.go\nM\tcmd/c.go\nM\tpkg/d.go\nM\tinternal/e.go\nM\ttest/f.go\nM\tdocs/g.go"
+	modelStdin := "diff --git a/src/a.go b/src/a.go"
+
+	modelCmd := "sed -n '1s/.*/inline prompt saw the full diff/p'"
+	result := GenerateWithModel(diff, "🐌", 3, modelCmd, 30*time.Second, modelStdin)
+
+	if result != "🐌 inline prompt saw the full diff" {
+		t.Errorf("expected stdin passed through unchanged, got %q", result)
+	}
+}
+
+func TestTruncateRunesIsRuneSafe(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		max   int
+		want  string
+	}{
+		{name: "short string unchanged", input: "fix bug", max: 72, want: "fix bug"},
+		{name: "ascii truncation", input: strings.Repeat("a", 80), max: 72, want: strings.Repeat("a", 72)},
+		{name: "multi-byte not split mid-rune", input: strings.Repeat("🐌", 40), max: 72, want: strings.Repeat("🐌", 40)},
+		{name: "multi-byte truncation on rune boundary", input: strings.Repeat("🐌", 40), max: 20, want: strings.Repeat("🐌", 20)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := truncateRunes(tt.input, tt.max); got != tt.want {
+				t.Errorf("truncateRunes(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.want)
+			}
+		})
+	}
+}

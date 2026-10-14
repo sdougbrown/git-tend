@@ -731,3 +731,97 @@ func TestSyncLockContentionSkips(t *testing.T) {
 	close(release)
 	<-done
 }
+
+// runModelSyncTest clones a repo, dirties a file, and runs one read-write
+// sync with the given commit config. It returns the remote's log.
+func runModelSyncTest(t *testing.T, commitCfg config.CommitConfig) string {
+	t.Helper()
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("changes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit:     commitCfg,
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	return testGit(t, clone2, "log", "--oneline")
+}
+
+func TestSyncModelStrategyUsesModel(t *testing.T) {
+	log := runModelSyncTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "model",
+		ModelCmd: "echo 'model wrote this'",
+	})
+	if !strings.Contains(log, "model wrote this") {
+		t.Errorf("expected model message in log, got:\n%s", log)
+	}
+}
+
+func TestSyncModelStrategyComposesDefaultPrompt(t *testing.T) {
+	// With strategy=model and no model_prompt, the built-in default prompt is
+	// appended to the name-status diff on the model's stdin.
+	modelCmd := "if grep -q 'name-status listing'; then echo 'prompt reached model'; else echo 'prompt missing'; fi"
+	log := runModelSyncTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "model",
+		ModelCmd: modelCmd,
+	})
+	if !strings.Contains(log, "prompt reached model") {
+		t.Errorf("expected composed default prompt on stdin, got:\n%s", log)
+	}
+}
+
+func TestSyncModelStrategyFallsBackOnError(t *testing.T) {
+	log := runModelSyncTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "model",
+		ModelCmd: "exit 1",
+	})
+	if !strings.Contains(log, "add work.txt") {
+		t.Errorf("expected heuristic fallback in log, got:\n%s", log)
+	}
+}
+
+func TestSyncDeterministicStrategyKeepsHeuristic(t *testing.T) {
+	// A model_cmd under the default strategy must stay fallback-only: the
+	// heuristic message "add work.txt" is informative, so the model is never
+	// consulted.
+	log := runModelSyncTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		ModelCmd: "echo 'model wrote this'",
+	})
+	if !strings.Contains(log, "add work.txt") {
+		t.Errorf("expected heuristic message in log, got:\n%s", log)
+	}
+	if strings.Contains(log, "model wrote this") {
+		t.Errorf("model should not run for informative heuristic message, got:\n%s", log)
+	}
+}

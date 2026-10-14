@@ -188,21 +188,41 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 	}
 
 	if strings.TrimSpace(diff) != "" {
+		modelTimeout := 30 * time.Second
+		if cfg.Commit.ModelTimeout != "" {
+			if d, err := time.ParseDuration(cfg.Commit.ModelTimeout); err == nil {
+				modelTimeout = d
+			}
+		}
+
+		// When a prompt is composed, the model gets the name-status diff
+		// followed by the prompt. Without a prompt the model command is
+		// treated as self-contained (e.g. it carries its own inline prompt)
+		// and receives the full diff, as before.
+		modelStdin := ""
+		prompt := cfg.Commit.ModelPrompt
+
 		var msg string
-		if cfg.Commit.ModelCmd != "" {
-			modelTimeout := 30 * time.Second
-			if cfg.Commit.ModelTimeout != "" {
-				if d, err := time.ParseDuration(cfg.Commit.ModelTimeout); err == nil {
-					modelTimeout = d
-				}
+		switch {
+		case cfg.Commit.Strategy == "model" && cfg.Commit.ModelCmd != "":
+			if prompt == "" {
+				prompt = commit.DefaultModelPrompt
 			}
-			fullDiff, fullErr := git.DiffCached(repoPath)
-			if fullErr == nil {
-				msg = commit.GenerateWithModel(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh, cfg.Commit.ModelCmd, modelTimeout, fullDiff)
+			modelStdin = diff + "\n\n" + prompt
+			msg = commit.GenerateModelFirst(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh, cfg.Commit.ModelCmd, modelTimeout, modelStdin)
+		case cfg.Commit.ModelCmd != "":
+			if prompt != "" {
+				modelStdin = diff + "\n\n" + prompt
 			} else {
-				msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
+				fullDiff, fullErr := git.DiffCached(repoPath)
+				if fullErr != nil {
+					msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
+					break
+				}
+				modelStdin = fullDiff
 			}
-		} else {
+			msg = commit.GenerateWithModel(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh, cfg.Commit.ModelCmd, modelTimeout, modelStdin)
+		default:
 			msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
 		}
 		if err := git.Commit(repoPath, msg, cfg.Commit.NoVerify); err != nil {

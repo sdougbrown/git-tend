@@ -26,6 +26,7 @@ type CommitConfig struct {
 	Strategy         string `toml:"strategy"`
 	Emoji            string `toml:"emoji"`
 	ModelCmd         string `toml:"model_cmd"`
+	ModelPrompt      string `toml:"model_prompt"`
 	ModelTimeout     string `toml:"model_timeout"`
 	FallbackThresh   int    `toml:"model_fallback_threshold"`
 	NoVerify         bool   `toml:"no_verify"`
@@ -253,6 +254,18 @@ func Parse(path string) (*Config, error) {
 
 	if cfg.Commit.Emoji == "" {
 		cfg.Commit.Emoji = "🐌"
+	}
+
+	if cfg.Commit.Strategy == "" {
+		cfg.Commit.Strategy = "deterministic"
+	}
+	if cfg.Commit.Strategy != "deterministic" && cfg.Commit.Strategy != "model" {
+		return nil, fmt.Errorf("invalid commit strategy %q: must be deterministic or model", cfg.Commit.Strategy)
+	}
+	// "model" with no model command has nothing to consult; behave exactly
+	// like the deterministic strategy.
+	if cfg.Commit.Strategy == "model" && cfg.Commit.ModelCmd == "" {
+		cfg.Commit.Strategy = "deterministic"
 	}
 
 	return &cfg, nil

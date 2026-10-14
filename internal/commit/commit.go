@@ -7,7 +7,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+// DefaultModelPrompt is the built-in prompt used when a repo opts into the
+// model strategy without configuring its own model_prompt. It names the
+// stdin content explicitly: models that aren't told what stdin holds often
+// claim they can't see the input.
+const DefaultModelPrompt = `Stdin contains a git diff --cached --name-status listing (status TAB path).
+Write one short imperative git commit message, max 72 characters, summarizing
+these changes. Output only the message text itself.`
 
 type change struct {
 	status  string
@@ -106,7 +115,11 @@ func topLevelDir(path string) string {
 	return path[:idx]
 }
 
-func GenerateWithModel(diffOutput string, emoji string, fallbackThreshold int, modelCmd string, modelTimeout time.Duration, fullDiff string) string {
+// GenerateWithModel is the deterministic strategy's model consultation: the
+// heuristic message is used unless it is low-information, in which case
+// modelCmd is run with modelStdin on stdin. On timeout, error, or empty
+// output the heuristic message stands.
+func GenerateWithModel(diffOutput string, emoji string, fallbackThreshold int, modelCmd string, modelTimeout time.Duration, modelStdin string) string {
 	msg := Generate(diffOutput, emoji, fallbackThreshold)
 
 	if modelCmd == "" {
@@ -117,6 +130,33 @@ func GenerateWithModel(diffOutput string, emoji string, fallbackThreshold int, m
 		return msg
 	}
 
+	result, ok := runModel(modelCmd, modelTimeout, modelStdin)
+	if !ok {
+		return msg
+	}
+
+	return applyEmoji(result, emoji)
+}
+
+// GenerateModelFirst is the model strategy: modelCmd is always consulted
+// with modelStdin on stdin, falling back to the heuristic message on
+// timeout, error, or empty output.
+func GenerateModelFirst(diffOutput string, emoji string, fallbackThreshold int, modelCmd string, modelTimeout time.Duration, modelStdin string) string {
+	fallback := Generate(diffOutput, emoji, fallbackThreshold)
+
+	if modelCmd == "" {
+		return fallback
+	}
+
+	result, ok := runModel(modelCmd, modelTimeout, modelStdin)
+	if !ok {
+		return fallback
+	}
+
+	return applyEmoji(result, emoji)
+}
+
+func runModel(modelCmd string, modelTimeout time.Duration, modelStdin string) (string, bool) {
 	if modelTimeout == 0 {
 		modelTimeout = 30 * time.Second
 	}
@@ -124,26 +164,48 @@ func GenerateWithModel(diffOutput string, emoji string, fallbackThreshold int, m
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", modelCmd)
-	cmd.Stdin = strings.NewReader(fullDiff)
+	cmd.Stdin = strings.NewReader(modelStdin)
 	out, err := cmd.Output()
 	if err != nil {
-		return msg
+		return "", false
 	}
 
 	result := strings.TrimSpace(string(out))
 	if result == "" {
-		return msg
+		return "", false
 	}
 
-	if len(result) > 72 {
-		result = result[:72]
-	}
+	return truncateRunes(result, 72), true
+}
 
-	if emoji != "" && !strings.HasPrefix(result, emoji) {
-		result = emoji + " " + result
+// applyEmoji prepends the configured emoji unless the message already
+// starts with one, so a model that picked its own emoji doesn't end up
+// doubled up (e.g. "🐌 📝 ...").
+func applyEmoji(result, emoji string) string {
+	if emoji != "" && !startsWithEmoji(result) {
+		return emoji + " " + result
 	}
-
 	return result
+}
+
+func startsWithEmoji(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	switch {
+	case r >= 0x1F300 && r <= 0x1FAFF, // pictographs, supplemental symbols
+		r >= 0x1F1E6 && r <= 0x1F1FF, // regional indicators (flags)
+		r >= 0x2600 && r <= 0x27BF,   // misc symbols, dingbats
+		r >= 0x2B00 && r <= 0x2BFF:   // misc symbols and arrows (e.g. ⭐)
+		return true
+	}
+	return false
+}
+
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 func isLowInformation(msg string) bool {
