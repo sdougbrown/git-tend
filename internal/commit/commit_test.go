@@ -410,20 +410,11 @@ func TestGenerateAgentNotConsultedForInformativeHeuristic(t *testing.T) {
 
 func TestGenerateAgentReceivesStdin(t *testing.T) {
 	fullDiff := "diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go"
-	agentCmd := `while IFS= read -r line; do
-	case "$line" in
-		repo:*) echo "$line" ;;
-		branch:*) echo "$line" ;;
-		diff\ --git*) echo "saw diff" ;;
-		prompt*) echo "saw prompt" ;;
-	esac
-done`
+	agentCmd := `input=$(cat); count=$(printf '%s\n' "$input" | grep -c -e '^repo: /tmp/repo$' -e '^branch: feature$' -e '^diff --git a/src/a.go b/src/a.go$' -e '^prompt text here$'); echo "saw $count of 4"`
 	result := GenerateAgent(agentLowInfoDiff(), fullDiff, "/tmp/repo", "feature", "prompt text here", "🐌", 1, agentCmd, 30*time.Second)
 
-	for _, want := range []string{"repo: /tmp/repo", "branch: feature", "saw diff", "saw prompt"} {
-		if !strings.Contains(result, want) {
-			t.Errorf("expected %q in agent output, got %q", want, result)
-		}
+	if result != "🐌 saw 4 of 4" {
+		t.Errorf("expected all four stdin lines counted, got %q", result)
 	}
 }
 
