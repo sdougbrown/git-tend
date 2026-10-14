@@ -321,7 +321,7 @@ func runModel(modelCmd string, modelTimeout time.Duration, modelStdin string) (s
 		return "", false
 	}
 
-	result := strings.TrimSpace(bw.buf)
+	result := strings.TrimSpace(string(bw.buf))
 	if result == "" {
 		return "", false
 	}
