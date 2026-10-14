@@ -421,8 +421,15 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 	res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
 	d.mu.Lock()
 	rs := d.repoStatus[repo.Path]
-	rs.AgentAttempts = res.Attempts
-	rs.AgentMaxAttempts = res.MaxAttempts
+	// Bump UpdatedAt when the budget actually changed: on a repeat stuck tick
+	// the state is already "stuck", so tick doesn't bump, and without this
+	// the merge in writeStatus keeps the stale on-disk budget (the display
+	// freezes at 1/2 and "agent exhausted" never shows).
+	if rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts {
+		rs.AgentAttempts = res.Attempts
+		rs.AgentMaxAttempts = res.MaxAttempts
+		rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	d.repoStatus[repo.Path] = rs
 	d.mu.Unlock()
 }

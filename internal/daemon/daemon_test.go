@@ -238,6 +238,75 @@ func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
 	}
 }
 
+// A repeat stuck tick must persist the budget transition (1/2 -> 2/2) to the
+// on-disk status: the tick only bumps UpdatedAt on the ok->stuck transition,
+// so without the bump in maybeRunAgent the merge keeps the stale on-disk
+// budget and the display freezes at 1/2.
+func TestDaemonTickAgentBudgetReachesCapOnDisk(t *testing.T) {
+	tempRoot := t.TempDir()
+	remote := setupBareRemote(t)
+	repoDir := filepath.Join(tempRoot, "agent-repo")
+
+	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
+	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(agentCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repoDir, "add", ".gittend")
+	testGitOK(t, repoDir, "commit", "-m", "agent config")
+	testGitOK(t, repoDir, "push", "-u", "origin", "main")
+
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.UserConfig{
+		Roots:          []string{tempRoot},
+		Interval:       "1s",
+		ScanDepth:      2,
+		NetworkTimeout: "5s",
+	}
+	stateDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d.rescanRoots()
+
+	ctx := context.Background()
+
+	// Tick 1: the hook fails, the repo goes stuck, the agent runs and fails;
+	// status shows the spent attempt.
+	d.tick(ctx)
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found after tick 1")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.CurrentState != "stuck" {
+		t.Fatalf("tick 1: state = %s (%s), want stuck", rs.CurrentState, rs.LastError)
+	}
+	if rs.AgentAttempts != 1 || rs.AgentMaxAttempts != 2 {
+		t.Errorf("tick 1: agent budget = %d/%d, want 1/2", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+
+	// Tick 2: the repo is still stuck; the agent runs its final attempt and
+	// fails. The 1/2 -> 2/2 transition must reach the on-disk status, or the
+	// display freezes at 1/2 and "agent exhausted" never shows.
+	d.tick(ctx)
+
+	sf2 := status.Read(filepath.Join(stateDir, "status.json"))
+	rs2 := sf2.Repos[repoDir]
+	if rs2.CurrentState != "stuck" {
+		t.Fatalf("tick 2: state = %s, want stuck", rs2.CurrentState)
+	}
+	if rs2.AgentAttempts != 2 || rs2.AgentMaxAttempts != 2 {
+		t.Errorf("tick 2: agent budget on disk = %d/%d, want 2/2", rs2.AgentAttempts, rs2.AgentMaxAttempts)
+	}
+}
+
 func TestPIDRefusal(t *testing.T) {
 	stateDir := t.TempDir()
 	pidPath := filepath.Join(stateDir, "daemon.pid")
