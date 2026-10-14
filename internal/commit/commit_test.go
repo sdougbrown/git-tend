@@ -469,6 +469,9 @@ func TestTruncateDiff(t *testing.T) {
 		// still land on a whole-rune boundary (valid UTF-8), not mid-rune.
 		diff := strings.Repeat("é", 30) // 60 bytes, no newline
 		got := truncateDiff(diff, 25)
+		if !strings.Contains(got, "[git-tend: diff truncated") {
+			t.Errorf("expected truncation note in output, got %q", got)
+		}
 		body := strings.TrimSuffix(got, truncationNote(25))
 		if !strings.HasPrefix(diff, body) {
 			t.Errorf("expected cut content to be a prefix of the diff, got %q", body)
@@ -478,6 +481,24 @@ func TestTruncateDiff(t *testing.T) {
 		}
 		if got := truncateDiff("\n"+strings.Repeat("a", 30), 10); !strings.HasPrefix(got, "\n") {
 			t.Errorf("expected newline at index 0 to be kept, got %q", got)
+		}
+	})
+
+	t.Run("mid-string newline cuts just after it", func(t *testing.T) {
+		// A window that contains a newline somewhere in the middle (not at
+		// index 0): the cut must end just after that newline, so the agent
+		// never sees a partial line.
+		diff := "abcdefghij\nklmnopqrst"
+		got := truncateDiff(diff, 15)
+		if !strings.Contains(got, "[git-tend: diff truncated") {
+			t.Errorf("expected truncation note in output, got %q", got)
+		}
+		body := strings.TrimSuffix(got, truncationNote(15))
+		if want := "abcdefghij\n"; body != want {
+			t.Errorf("expected cut to end just after the mid-string newline, got %q, want %q", body, want)
+		}
+		if !strings.HasSuffix(body, "\n") {
+			t.Errorf("expected cut to end with a newline, got %q", body)
 		}
 	})
 }
