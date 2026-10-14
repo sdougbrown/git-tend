@@ -429,7 +429,7 @@ done`
 
 func TestGenerateAgentUsesDefaultPrompt(t *testing.T) {
 	agentCmd := "if grep -q 'imperative subject'; then echo 'default prompt present'; else echo 'default prompt missing'; fi"
-	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, agentCmd, 30*time.Second)
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", DefaultAgentPrompt, "🐌", 1, agentCmd, 30*time.Second)
 
 	if result != "🐌 default prompt present" {
 		t.Errorf("expected default prompt on stdin, got %q", result)

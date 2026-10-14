@@ -204,10 +204,6 @@ func GenerateAgent(nameStatusDiff, fullDiff, repoPath, branch, prompt, emoji str
 		return msg
 	}
 
-	if prompt == "" {
-		prompt = DefaultAgentPrompt
-	}
-
 	result, ok := runAgent(agentCmd, timeout, agentStdin(fullDiff, repoPath, branch, prompt))
 	if !ok {
 		return msg
