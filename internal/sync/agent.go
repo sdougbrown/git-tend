@@ -32,7 +32,7 @@ type stuckFile struct {
 }
 
 // stuckRecord is the daemon-issued provenance record for a stuck episode.
-// writeStuck writes one to the state dir whenever it writes the repo-local
+// writeStuck writes one to the state dir before writing the repo-local
 // .gittend.stuck file. The repo-local file is untrusted — anyone with write
 // access to the repo can forge one — so RunStuckAgent refuses to act unless
 // the file's stuck_at matches a daemon-issued record, and the record's
@@ -259,16 +259,32 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	return res
 }
 
+// defaultAgentMaxAttempts mirrors the default config.Parse applies; RunStuckAgent
+// also guards on it so callers passing an un-Parsed config don't get a
+// permanently disabled agent (MaxAttempts 0 would trip the cap immediately).
+const defaultAgentMaxAttempts = 2
+
 // maxStuckFileBytes caps how much of the repo-controlled stuck file is read.
 const maxStuckFileBytes = 1 << 20
 
 func readStuckFile(repoPath string) (*stuckFile, error) {
-	f, err := os.Open(filepath.Join(repoPath, ".gittend.stuck"))
+	// O_NOFOLLOW: the path is repo-controlled, so a symlink planted there
+	// must not turn this into a read from an arbitrary target.
+	f, err := os.OpenFile(filepath.Join(repoPath, ".gittend.stuck"), os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	// The stuck file is repo-controlled input; never read it unbounded.
+	// Refuse oversized files outright rather than parsing a truncated prefix:
+	// the cap bounds repo-controlled input, so anything bigger is not a stuck
+	// file this daemon wrote.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() > maxStuckFileBytes {
+		return nil, fmt.Errorf("stuck file is %d bytes, over the %d byte cap", fi.Size(), maxStuckFileBytes)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxStuckFileBytes))
 	if err != nil {
 		return nil, err
@@ -306,6 +322,21 @@ func AcquireAgentLock(stateDir, repoPath string) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// removeStuckRecordIfCurrent deletes the provenance record only if it still
+// belongs to the episode the caller acted on. A concurrent writer recording a
+// fresh episode must not have its record deleted here — that would orphan the
+// new flag with the agent permanently disabled. Callers hold the agent lock,
+// which serializes them against writeStuck; the stuck_at comparison is
+// defence in depth.
+func removeStuckRecordIfCurrent(stateDir, repoPath, stuckAt string) {
+	path := StuckRecordPath(stateDir, repoPath)
+	rec, err := readStuckRecord(path)
+	if err != nil || rec.StuckAt != stuckAt {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 func readStuckRecord(path string) (*stuckRecord, error) {
