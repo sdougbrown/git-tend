@@ -402,6 +402,20 @@ func (d *Daemon) readSnooze(repoPath string) time.Time {
 // touching the repo while it runs.
 func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 	if repo.Config == nil || !repo.Config.Agent.Enabled() {
+		// The agent is no longer configured: clear any budget a previous tick
+		// recorded, or status would show "agent pending" forever on a stuck
+		// repo whose on_stuck_cmd was removed. Bump UpdatedAt only when
+		// something actually changed, so the merge in writeStatus doesn't
+		// keep the stale on-disk budget over the cleared one.
+		d.mu.Lock()
+		rs := d.repoStatus[repo.Path]
+		if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+			rs.AgentAttempts = 0
+			rs.AgentMaxAttempts = 0
+			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		d.repoStatus[repo.Path] = rs
+		d.mu.Unlock()
 		return
 	}
 	res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)

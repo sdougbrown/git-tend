@@ -167,6 +167,77 @@ func countMarkerRuns(marker string) int {
 	return len(strings.Split(strings.TrimRight(string(data), "\n"), "\n"))
 }
 
+func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
+	tempRoot := t.TempDir()
+	remote := setupBareRemote(t)
+	repoDir := filepath.Join(tempRoot, "agent-repo")
+
+	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
+	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(agentCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repoDir, "add", ".gittend")
+	testGitOK(t, repoDir, "commit", "-m", "agent config")
+	testGitOK(t, repoDir, "push", "-u", "origin", "main")
+
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.UserConfig{
+		Roots:          []string{tempRoot},
+		Interval:       "1s",
+		ScanDepth:      2,
+		NetworkTimeout: "5s",
+	}
+	stateDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d.rescanRoots()
+
+	ctx := context.Background()
+
+	// Tick 1: the hook fails, the repo goes stuck, the agent runs and fails,
+	// and status shows the spent attempt.
+	d.tick(ctx)
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found after tick 1")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.CurrentState != "stuck" {
+		t.Fatalf("tick 1: state = %s (%s), want stuck", rs.CurrentState, rs.LastError)
+	}
+	if rs.AgentAttempts != 1 || rs.AgentMaxAttempts != 2 {
+		t.Errorf("tick 1: agent budget = %d/%d, want 1/2", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+
+	// The operator removes the agent from .gittend; the repo stays stuck.
+	noAgentCfg := "mode = \"read-write\"\ndebounce = \"0s\"\n"
+	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(noAgentCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d.rescanRoots()
+
+	// Tick 2: the repo is still stuck, but with the agent disabled the stale
+	// budget must not linger — status shows plain stuck, not "agent pending".
+	d.tick(ctx)
+
+	sf2 := status.Read(filepath.Join(stateDir, "status.json"))
+	rs2 := sf2.Repos[repoDir]
+	if rs2.CurrentState != "stuck" {
+		t.Fatalf("tick 2: state = %s, want stuck", rs2.CurrentState)
+	}
+	if rs2.AgentAttempts != 0 || rs2.AgentMaxAttempts != 0 {
+		t.Errorf("tick 2: agent budget = %d/%d, want 0/0 after agent disabled", rs2.AgentAttempts, rs2.AgentMaxAttempts)
+	}
+}
+
 func TestPIDRefusal(t *testing.T) {
 	stateDir := t.TempDir()
 	pidPath := filepath.Join(stateDir, "daemon.pid")
