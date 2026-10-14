@@ -825,3 +825,67 @@ func TestSyncDeterministicStrategyKeepsHeuristic(t *testing.T) {
 		t.Errorf("model should not run for informative heuristic message, got:\n%s", log)
 	}
 }
+
+func TestSyncDeterministicStrategyPromptSendsNameStatusDiff(t *testing.T) {
+	// Under the default strategy with a custom model_prompt, the model's
+	// stdin must be the name-status diff followed by the prompt — not the
+	// full patch. A bug that reuses fullDiff in the prompt branch would send
+	// the full patch instead, which this test catches.
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Stage enough files across more top-level directories than the fallback
+	// threshold so the heuristic is low-information ("sync N files") and the
+	// model is consulted.
+	for _, dir := range []string{"src", "lib", "cmd", "pkg"} {
+		if err := os.MkdirAll(filepath.Join(repo, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, dir, "f.txt"), []byte(dir), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	// The model command reports what it sees on stdin: whether the custom
+	// prompt is present, whether the full-patch marker is present, and
+	// whether a name-status line is present.
+	modelCmd := "input=$(cat); p=missing; if printf '%s\\n' \"$input\" | grep -q 'custom prompt marker'; then p=present; fi; f=full; if printf '%s\\n' \"$input\" | grep -q 'diff --git'; then f=full; else f=none; fi; n=none; if printf '%s\\n' \"$input\" | grep -q 'A\tcmd/f.txt'; then n=ns; fi; echo \"prompt=$p full=$f ns=$n\""
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji:          "🐌",
+			ModelCmd:       modelCmd,
+			ModelPrompt:    "custom prompt marker",
+			FallbackThresh: 3,
+		},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	log := testGit(t, clone2, "log", "--oneline")
+	if !strings.Contains(log, "prompt=present full=none ns=ns") {
+		t.Errorf("expected custom prompt + name-status diff (no full patch) on model stdin, got:\n%s", log)
+	}
+}
