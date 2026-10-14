@@ -96,9 +96,11 @@ func StuckRecordPath(stateDir, repoPath string) string {
 // the flag is what actually serializes the agent against syncs, so holding the
 // lock for minutes of agent time would only delay concurrent `git-tend run`
 // and manual syncs for no protection. Concurrent agent runs are excluded by a
-// dedicated per-repo flock (see acquireAgentLock), which also covers the
-// daemon-restart case: a replacement daemon can't start a second run while
-// the orphaned first run is still going.
+// dedicated per-repo flock (see AcquireAgentLock), which also covers the
+// daemon-restart case: the lock fd is passed to the agent command itself, so
+// the kernel keeps the flock until every process of the run has exited — a
+// replacement daemon can't start a second run on the same tree while an
+// orphaned run (daemon died mid-command) is still going.
 func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, stateDir string, logger *slog.Logger) AgentRunResult {
 	agent := cfg.Agent
 	var res AgentRunResult
@@ -142,12 +144,12 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	recordPath := AgentStatePath(stateDir, repoPath)
 
 	// Serialize agent runs per repo. A flock (not a PID/timestamp marker) so
-	// the kernel releases it the moment the holding process dies: a crashed
-	// daemon can't wedge the feature and no stale-marker liveness heuristics
-	// are needed. It doesn't kill a run orphaned by a daemon restart — it
-	// only stops the replacement daemon from starting a second concurrent
+	// no stale-marker liveness heuristics are needed. The fd is shared with
+	// the agent command itself (cmd.ExtraFiles below), so a run orphaned by a
+	// daemon restart keeps holding the lock until the whole process group
+	// exits — the replacement daemon then can't start a second concurrent
 	// run on the same repo.
-	lock, err := acquireAgentLock(stateDir, repoPath)
+	lock, err := AcquireAgentLock(stateDir, repoPath)
 	if err != nil {
 		if logger != nil {
 			logger.Debug("agent unstick: another agent run is in flight", "repo", repoPath)
@@ -195,6 +197,12 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// child (or grandchild), and killing only the shell would orphan it —
 	// still running with daemon privileges.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Hand the lock fd to the command: the flock lives on the open file
+	// description, so the child (and anything it spawns that inherits the fd)
+	// keeps holding it even if the daemon dies mid-run. Without this, the
+	// kernel would release the lock the instant the daemon died — while the
+	// orphaned command group was still working on the tree.
+	cmd.ExtraFiles = []*os.File{lock}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -278,11 +286,18 @@ func AgentLockPath(stateDir, repoPath string) string {
 	return filepath.Join(stateDir, "agent", hex.EncodeToString(hash[:])+".lock")
 }
 
-func acquireAgentLock(stateDir, repoPath string) (*os.File, error) {
+// AcquireAgentLock takes the per-repo agent-run flock. Callers that mutate
+// agent-relevant state (RunStuckAgent, writeStuck, `git-tend unstick`) hold it
+// so their record/flag writes serialize against each other. The fd returned
+// must be passed to the agent command via cmd.ExtraFiles so the lock outlives
+// the daemon process (see RunStuckAgent).
+func AcquireAgentLock(stateDir, repoPath string) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Join(stateDir, "agent"), 0755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDWR, 0644)
+	// 0600: flock only requires an open fd, so a world-readable lock file
+	// would let any local user LOCK_EX it and block all agent runs.
+	f, err := os.OpenFile(AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
