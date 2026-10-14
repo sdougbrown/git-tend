@@ -300,10 +300,10 @@ func translateExcludePaths(paths []string) []string {
 // writeStuck writes the repo-local .gittend.stuck flag and, alongside it, a
 // daemon-issued provenance record in the state dir (see stuckRecord). The
 // record is what authorizes the agent to act on the flag. The record is
-// written FIRST: a crash between the two writes then leaves a flag with no
-// record — the agent refuses to act, which is the fail-safe direction. Both
-// writes happen under the agent lock so an in-flight agent run's cleanup can
-// never interleave with (and mis-delete) a fresh episode's record.
+// written FIRST: a crash between the two writes then leaves a record with no
+// flag — the agent has no flag to act on, which is the fail-safe direction.
+// Both writes happen under the agent lock so an in-flight agent run's
+// cleanup can never interleave with (and mis-delete) a fresh episode's record.
 func writeStuck(stateDir, repoPath, reason, lastCommand string, exitCode int, output string) error {
 	lock, err := AcquireAgentLock(stateDir, repoPath)
 	if err != nil {

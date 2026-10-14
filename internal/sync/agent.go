@@ -341,9 +341,16 @@ func AcquireAgentLock(stateDir, repoPath string) (*os.File, error) {
 		return nil, err
 	}
 	// 0600: flock only requires an open fd, so a world-readable lock file
-	// would let any local user LOCK_EX it and block all agent runs.
-	f, err := os.OpenFile(AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDWR, 0600)
+	// would let any local user LOCK_EX it and block all agent runs. Chmod
+	// after open so a lock file created by an older version at 0644 is
+	// tightened too.
+	lockPath := AgentLockPath(stateDir, repoPath)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(lockPath, 0600); err != nil {
+		f.Close()
 		return nil, err
 	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -652,5 +653,82 @@ func TestWriteStuckRefusesWhileAgentLockHeld(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
 		t.Error("stuck flag should exist after a successful writeStuck")
+	}
+}
+
+// The agent-run lock must survive daemon death via fd inheritance: while the
+// child holding the inherited lock fd lives, a second acquisition fails; once
+// the child exits, the lock is free again.
+func TestAgentLockSurvivesDaemonDeathViaInheritedFd(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatalf("acquiring lock: %v", err)
+	}
+	script := filepath.Join(t.TempDir(), "child.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(script)
+	child.ExtraFiles = []*os.File{lock}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lock.Close() // simulates the daemon dying while the child lives
+
+	if second, err := AcquireAgentLock(stateDir, repo); err == nil {
+		second.Close()
+		t.Error("lock should still be held by the child after the parent's fd is closed")
+	}
+	_ = child.Wait()
+
+	second, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatalf("lock should be free after the child exits: %v", err)
+	}
+	second.Close()
+}
+
+// A symlinked stuck file must be refused on the read side too, not just on
+// the write side.
+func TestReadStuckFileRefusesSymlink(t *testing.T) {
+	repo := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("stuck_at = \"x\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStuckFile(repo); err == nil {
+		t.Error("expected symlinked stuck file to be refused")
+	}
+}
+
+// A lock file created by an older version at a loose mode is tightened to
+// 0600 on the next acquisition.
+func TestAgentLockModeTightenedOnExistingFile(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	lockPath := AgentLockPath(stateDir, repo)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatalf("acquiring lock: %v", err)
+	}
+	defer lock.Close()
+	fi, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("expected lock file mode 0600, got %v", fi.Mode().Perm())
 	}
 }
