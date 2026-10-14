@@ -247,6 +247,44 @@ func TestGenerateModelFirstReceivesStdin(t *testing.T) {
 	}
 }
 
+func TestStartsWithEmoji(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{"pictograph", "📝 fix the parser", true},
+		{"regional indicator", "🇺🇸 shipping", true},
+		{"gap range: misc technical", "⏰ fix the alarm", true},
+		{"gap range: geometric shapes", "▶ resume playback", true},
+		{"enclosed alphanumeric", "🆕 add feature", true},
+		{"enclosed ideographic", "🈁 marker", true},
+		{"emoji codepoint in arrows block", "⬅ move left", true},
+		{"star", "⭐ star it", true},
+		{"plain arrow in arrows block", "⬀ draw arrow", false},
+		{"plain ascii", "fix the parser", false},
+		{"variation selector before emoji", "\uFE0F⏰ fix the alarm", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := startsWithEmoji(tt.msg); got != tt.want {
+				t.Errorf("startsWithEmoji(%q) = %v, want %v", tt.msg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyEmoji(t *testing.T) {
+	// Gap-range emoji already present: must not be doubled up.
+	if got := applyEmoji("⏰ fix the alarm", "🐌"); got != "⏰ fix the alarm" {
+		t.Errorf("expected emoji kept, got %q", got)
+	}
+	// No emoji present: configured emoji is prepended.
+	if got := applyEmoji("fix the alarm", "🐌"); got != "🐌 fix the alarm" {
+		t.Errorf("expected prefix added, got %q", got)
+	}
+}
+
 func TestGenerateModelFirstKeepsModelEmoji(t *testing.T) {
 	diff := "M\tsrc/a.go\nM\tsrc/b.go"
 

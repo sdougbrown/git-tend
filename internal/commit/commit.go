@@ -189,12 +189,25 @@ func applyEmoji(result, emoji string) string {
 }
 
 func startsWithEmoji(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
+	r, size := utf8.DecodeRuneInString(s)
+	// A leading U+FE0F variation selector qualifies the next rune as emoji
+	// presentation; skip it so a selector-qualified emoji is still detected.
+	if r == 0xFE0F {
+		r, _ = utf8.DecodeRuneInString(s[size:])
+	}
 	switch {
 	case r >= 0x1F300 && r <= 0x1FAFF, // pictographs, supplemental symbols
 		r >= 0x1F1E6 && r <= 0x1F1FF, // regional indicators (flags)
+		r >= 0x1F170 && r <= 0x1F1E5, // enclosed alphanumeric supplement (🅰 🆒 🆕)
+		r >= 0x1F200 && r <= 0x1F2FF, // enclosed ideographic supplement (🈁 🈳)
+		r >= 0x2300 && r <= 0x23FF,   // misc technical (⌚ ⏰ ⏳ ⏸)
+		r >= 0x2500 && r <= 0x25FF,   // geometric shapes (▶ ◀ ▲ ▼)
 		r >= 0x2600 && r <= 0x27BF,   // misc symbols, dingbats
-		r >= 0x2B00 && r <= 0x2BFF:   // misc symbols and arrows (e.g. ⭐)
+		// Misc symbols and arrows: only the RGI emoji codepoints, not the
+		// plain arrows in the block (⬀–⬄).
+		r >= 0x2B05 && r <= 0x2B07, // ⬅ ⬆ ⬇
+		r >= 0x2B1B && r <= 0x2B1C, // ⬛ ⬜
+		r == 0x2B50 || r == 0x2B55: // ⭐ ⭕
 		return true
 	}
 	return false
