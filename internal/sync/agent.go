@@ -138,8 +138,14 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 
 	// From here on the agent is engaged with this stuck episode; status may
-	// show the attempt budget.
-	res.MaxAttempts = agent.MaxAttempts
+	// show the attempt budget. An un-Parsed config (tests, direct callers)
+	// leaves MaxAttempts at 0, which would make the cap below permanently
+	// disable the agent; apply the same default config.Parse does.
+	maxAttempts := agent.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultAgentMaxAttempts
+	}
+	res.MaxAttempts = maxAttempts
 
 	recordPath := AgentStatePath(stateDir, repoPath)
 
@@ -154,8 +160,12 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		if logger != nil {
 			logger.Debug("agent unstick: another agent run is in flight", "repo", repoPath)
 		}
-		if rec, rerr := readAgentAttempt(recordPath); rerr == nil {
-			res.Attempts = rec.Attempts
+		// Report the same fail-closed budget the non-contended path would:
+		// an unparseable record must not surface as a fresh (0-attempt) one.
+		if att, rerr := readAgentAttempt(recordPath); rerr != nil {
+			res.Attempts = maxAttempts
+		} else {
+			res.Attempts = att.Attempts
 		}
 		return res
 	}
@@ -170,7 +180,7 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		if logger != nil {
 			logger.Warn("agent unstick: unreadable attempt record, treating budget as spent", "repo", repoPath, "error", err)
 		}
-		res.Attempts = agent.MaxAttempts
+		res.Attempts = maxAttempts
 		return res
 	}
 	// The budget is per repo, not per stuck file: a new episode — even one
@@ -179,10 +189,10 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// provenance match gates whether the agent runs at all, and the counter
 	// only resets on a successful sync or a human unstick.
 	res.Attempts = record.Attempts
-	if record.Attempts >= agent.MaxAttempts {
+	if record.Attempts >= maxAttempts {
 		if logger != nil {
 			logger.Info("agent unstick: attempt cap reached, waiting for human", "repo", repoPath,
-				"attempts", record.Attempts, "max_attempts", agent.MaxAttempts)
+				"attempts", record.Attempts, "max_attempts", maxAttempts)
 		}
 		return res
 	}
@@ -231,18 +241,22 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 
 	if runErr == nil {
 		// Recovery: clear the flag and the provenance record so the next tick
-		// syncs normally. The attempt counter is deliberately kept: an exit 0
-		// that doesn't actually fix the repo must not re-arm a full budget on
-		// the next failed sync. A successful sync clears it instead.
+		// syncs normally. The incremented attempt counter is persisted BEFORE
+		// the flag is removed: the budget is cumulative for the repo, so an
+		// exit 0 that doesn't actually fix the repo must leave the spent
+		// attempt on disk — otherwise every episode re-arms a fresh budget. A
+		// successful sync or `git-tend unstick` clears the record instead.
+		if err := writeAgentAttempt(recordPath, record); err != nil && logger != nil {
+			logger.Error("agent unstick: saving attempt record after recovery", "repo", repoPath, "error", err)
+		}
 		if err := os.Remove(filepath.Join(repoPath, ".gittend.stuck")); err != nil && !os.IsNotExist(err) {
 			res.Err = fmt.Errorf("exit 0 but removing stuck flag: %w", err)
-			_ = writeAgentAttempt(recordPath, record)
 			return res
 		}
-		_ = os.Remove(StuckRecordPath(stateDir, repoPath))
+		removeStuckRecordIfCurrent(stateDir, repoPath, rec.StuckAt)
 		res.Recovered = true
 		if logger != nil {
-			logger.Info("agent unstick: recovered", "repo", repoPath, "reason", stuck.Reason)
+			logger.Info("agent unstick: recovered", "repo", repoPath, "reason", rec.Reason)
 		}
 		return res
 	}
@@ -254,9 +268,24 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 	if logger != nil {
 		logger.Warn("agent unstick: command failed", "repo", repoPath, "error", runErr,
-			"attempts", record.Attempts, "max_attempts", agent.MaxAttempts)
+			"attempts", record.Attempts, "max_attempts", maxAttempts)
 	}
 	return res
+}
+
+// removeStuckRecordIfCurrent deletes the provenance record only if it still
+// belongs to the episode the caller acted on. A concurrent writer recording a
+// fresh episode must not have its record deleted here — that would orphan the
+// new flag with the agent permanently disabled. Callers hold the agent lock,
+// which serializes them against writeStuck; the stuck_at comparison is
+// defence in depth.
+func removeStuckRecordIfCurrent(stateDir, repoPath, stuckAt string) {
+	path := StuckRecordPath(stateDir, repoPath)
+	rec, err := readStuckRecord(path)
+	if err != nil || rec.StuckAt != stuckAt {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // defaultAgentMaxAttempts mirrors the default config.Parse applies; RunStuckAgent
@@ -324,21 +353,6 @@ func AcquireAgentLock(stateDir, repoPath string) (*os.File, error) {
 	return f, nil
 }
 
-// removeStuckRecordIfCurrent deletes the provenance record only if it still
-// belongs to the episode the caller acted on. A concurrent writer recording a
-// fresh episode must not have its record deleted here — that would orphan the
-// new flag with the agent permanently disabled. Callers hold the agent lock,
-// which serializes them against writeStuck; the stuck_at comparison is
-// defence in depth.
-func removeStuckRecordIfCurrent(stateDir, repoPath, stuckAt string) {
-	path := StuckRecordPath(stateDir, repoPath)
-	rec, err := readStuckRecord(path)
-	if err != nil || rec.StuckAt != stuckAt {
-		return
-	}
-	_ = os.Remove(path)
-}
-
 func readStuckRecord(path string) (*stuckRecord, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -404,6 +418,14 @@ func writeJSONAtomic(path string, v any) error {
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	// fsync before rename: without it a power loss can leave the rename
+	// durable while the data is not, and a zero-length record fails to parse
+	// — which fails closed and wedges the agent until a human intervenes.
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return err

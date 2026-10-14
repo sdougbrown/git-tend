@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -223,15 +224,34 @@ func TestAgentExitZeroRecovers(t *testing.T) {
 	testGitOK(t, repo, "push", "-u", "origin", "main")
 
 	writeStuckState(t, stateDir, repo, "hook_failed")
-	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	// Pre-spend an attempt so the recovery path's persistence is observable:
+	// an exit-0 recovery keeps (and increments) the attempt record rather
+	// than resetting the budget — only a successful sync or unstick clears it.
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 1), nil, 2, "10s"), stateDir, nil)
+	if !res.Ran || res.Recovered || res.Attempts != 1 {
+		t.Fatalf("expected a failed pre-spending run, got ran=%v recovered=%v attempts=%d", res.Ran, res.Recovered, res.Attempts)
+	}
+
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
 	if !res.Recovered {
 		t.Fatalf("expected recovery, got ran=%v recovered=%v err=%v", res.Ran, res.Recovered, res.Err)
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); !os.IsNotExist(err) {
 		t.Error("stuck flag should be removed on exit 0")
 	}
-	if _, err := os.Stat(AgentStatePath(stateDir, repo)); !os.IsNotExist(err) {
-		t.Error("attempt record should be removed on recovery")
+	if _, err := os.Stat(AgentStatePath(stateDir, repo)); err != nil {
+		t.Fatal("attempt record should survive recovery (budget is not re-armed)")
+	}
+	data, err := os.ReadFile(AgentStatePath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var att agentAttempt
+	if err := json.Unmarshal(data, &att); err != nil {
+		t.Fatal(err)
+	}
+	if att.Attempts != 2 {
+		t.Errorf("attempt record has Attempts=%d after recovery, want 2 (increment persisted)", att.Attempts)
 	}
 	if _, err := os.Stat(StuckRecordPath(stateDir, repo)); !os.IsNotExist(err) {
 		t.Error("provenance record should be removed on recovery")
