@@ -78,7 +78,7 @@ func sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir str
 		return syncReadOnly(ctx, repoPath, timeout)
 	}
 
-	return syncReadWrite(ctx, repoPath, cfg, timeout, bypassDebounce)
+	return syncReadWrite(ctx, repoPath, cfg, timeout, bypassDebounce, branch)
 }
 
 func parseIntervalTimeout(interval string) time.Duration {
@@ -118,7 +118,7 @@ func syncReadOnly(ctx context.Context, repoPath string, timeout time.Duration) S
 	return SyncResult{State: "ok"}
 }
 
-func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, timeout time.Duration, bypassDebounce bool) SyncResult {
+func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, timeout time.Duration, bypassDebounce bool, branch string) SyncResult {
 	debounceDur := parseDebounce(cfg.Debounce)
 
 	// Back off if git appears busy, so we don't tend the repo out from under a
@@ -204,6 +204,24 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 
 		var msg string
 		switch {
+		case cfg.Commit.Strategy == "agent" && cfg.Commit.ModelCmd != "":
+			// The agent gets the full staged diff, repo path, and branch, and
+			// authors a possibly multi-line message; the daemon still runs git
+			// commit itself, so every guard above (flock, debounce,
+			// in_progress_window, lock back-off) stays in the loop. The quiet-
+			// time guarantee is not violated by a long agent run here: the
+			// debounce check ran before staging and the diff we commit is the
+			// one staged at check time, and the per-repo flock is held for the
+			// whole sync, so no concurrent git-tend work can interleave.
+			if prompt == "" {
+				prompt = commit.DefaultAgentPrompt
+			}
+			fullDiff, fullErr := git.DiffCached(repoPath)
+			if fullErr != nil {
+				msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
+				break
+			}
+			msg = commit.GenerateAgent(diff, fullDiff, repoPath, branch, prompt, cfg.Commit.Emoji, cfg.Commit.FallbackThresh, cfg.Commit.ModelCmd, modelTimeout)
 		case cfg.Commit.Strategy == "model" && cfg.Commit.ModelCmd != "":
 			if prompt == "" {
 				prompt = commit.DefaultModelPrompt

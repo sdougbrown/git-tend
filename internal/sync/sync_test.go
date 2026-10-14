@@ -732,9 +732,11 @@ func TestSyncLockContentionSkips(t *testing.T) {
 	<-done
 }
 
-// runModelSyncTest clones a repo, dirties a file, and runs one read-write
-// sync with the given commit config. It returns the remote's log.
-func runModelSyncTest(t *testing.T, commitCfg config.CommitConfig) string {
+// runSyncCommitTest clones a repo, lets dirty modify the working tree, and
+// runs one read-write sync with the given commit config. It returns the
+// remote's commit messages in full (subject and body) so multi-line messages
+// can be asserted on.
+func runSyncCommitTest(t *testing.T, commitCfg config.CommitConfig, dirty func(repo string)) string {
 	t.Helper()
 	remote := gitInitBare(t)
 	defer os.RemoveAll(remote)
@@ -748,6 +750,9 @@ func runModelSyncTest(t *testing.T, commitCfg config.CommitConfig) string {
 
 	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("changes"), 0644); err != nil {
 		t.Fatal(err)
+	}
+	if dirty != nil {
+		dirty(repo)
 	}
 
 	stateDir, err := os.MkdirTemp("", "gittend-state-*")
@@ -771,7 +776,103 @@ func runModelSyncTest(t *testing.T, commitCfg config.CommitConfig) string {
 
 	clone2 := gitClone(t, remote)
 	defer os.RemoveAll(clone2)
-	return testGit(t, clone2, "log", "--oneline")
+	return testGit(t, clone2, "log", "--format=%B")
+}
+
+// runModelSyncTest clones a repo, dirties a single file, and runs one
+// read-write sync with the given commit config.
+func runModelSyncTest(t *testing.T, commitCfg config.CommitConfig) string {
+	return runSyncCommitTest(t, commitCfg, nil)
+}
+
+func TestSyncAgentStrategyUsesAgent(t *testing.T) {
+	log := runSyncCommitTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "agent",
+		ModelCmd: "echo 'agent wrote this subject'",
+	}, dirtyAcrossDirs)
+	if !strings.Contains(log, "agent wrote this subject") {
+		t.Errorf("expected agent message in log, got:\n%s", log)
+	}
+}
+
+func TestSyncAgentStrategyPassesMultiLineMessage(t *testing.T) {
+	log := runSyncCommitTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "agent",
+		ModelCmd: "printf 'agent subject\n\nagent body explaining the why\n'",
+	}, dirtyAcrossDirs)
+	if !strings.Contains(log, "agent subject") {
+		t.Errorf("expected agent subject in log, got:\n%s", log)
+	}
+	if !strings.Contains(log, "agent body explaining the why") {
+		t.Errorf("expected agent body to survive the commit, got:\n%s", log)
+	}
+}
+
+func TestSyncAgentStrategyReceivesFullDiff(t *testing.T) {
+	// The agent runs after staging, so its stdin must carry the full cached
+	// diff — this pins the ordering: debounce/lock checks, then git add,
+	// then the agent.
+	agentCmd := "if grep -q '^diff --git'; then echo 'agent saw full diff'; else echo 'agent missing diff'; fi"
+	log := runSyncCommitTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "agent",
+		ModelCmd: agentCmd,
+	}, dirtyAcrossDirs)
+	if !strings.Contains(log, "agent saw full diff") {
+		t.Errorf("expected full diff on agent stdin, got:\n%s", log)
+	}
+}
+
+func TestSyncAgentStrategyFallsBackOnEmptyOutput(t *testing.T) {
+	log := runSyncCommitTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "agent",
+		ModelCmd: "true",
+	}, dirtyAcrossDirs)
+	if !strings.Contains(log, "sync 2 files") {
+		t.Errorf("expected heuristic fallback in log, got:\n%s", log)
+	}
+}
+
+func TestSyncAgentStrategyFallsBackOnError(t *testing.T) {
+	log := runSyncCommitTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "agent",
+		ModelCmd: "exit 1",
+	}, dirtyAcrossDirs)
+	if !strings.Contains(log, "sync 2 files") {
+		t.Errorf("expected heuristic fallback in log, got:\n%s", log)
+	}
+}
+
+func TestSyncAgentStrategySkipsAgentForInformativeHeuristic(t *testing.T) {
+	// A single-file change yields "add work.txt", which is informative, so
+	// the agent must never be invoked (cost guardrail).
+	log := runSyncCommitTest(t, config.CommitConfig{
+		Emoji:    "🐌",
+		Strategy: "agent",
+		ModelCmd: "echo 'agent should not run'",
+	}, nil)
+	if !strings.Contains(log, "add work.txt") {
+		t.Errorf("expected heuristic message in log, got:\n%s", log)
+	}
+	if strings.Contains(log, "agent should not run") {
+		t.Errorf("agent should not run for informative heuristic, got:\n%s", log)
+	}
+}
+
+// dirtyAcrossDirs touches a second file in a different top-level directory so
+// the heuristic produces a low-information "sync 2 files" message — the only
+// state in which the agent strategy consults the agent.
+func dirtyAcrossDirs(repo string) {
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "src", "thing.txt"), []byte("changes"), 0644); err != nil {
+		panic(err)
+	}
 }
 
 func TestSyncModelStrategyUsesModel(t *testing.T) {

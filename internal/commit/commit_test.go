@@ -1,6 +1,7 @@
 package commit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -345,5 +346,150 @@ func TestTruncateRunesIsRuneSafe(t *testing.T) {
 				t.Errorf("truncateRunes(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.want)
 			}
 		})
+	}
+}
+
+// agentLowInfoDiff produces a heuristic message of "sync N files" so the
+// agent strategy's low-information trigger fires.
+func agentLowInfoDiff() string {
+	return "M\ta/1\nM\ta/2\nM\ta/3\nM\tb/1\nM\tb/2\nM\tb/3"
+}
+
+func TestGenerateAgentPassesMultiLineMessageThrough(t *testing.T) {
+	agentCmd := "printf 'subject line\n\nbody explaining the why\n'"
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, agentCmd, 30*time.Second)
+
+	want := "🐌 subject line\n\nbody explaining the why"
+	if result != want {
+		t.Errorf("GenerateAgent() = %q, want %q", result, want)
+	}
+}
+
+func TestGenerateAgentKeepsAgentEmoji(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "echo '📝 rewrite the parser'", 30*time.Second)
+
+	if result != "📝 rewrite the parser" {
+		t.Errorf("GenerateAgent() = %q, want %q", result, "📝 rewrite the parser")
+	}
+}
+
+func TestGenerateAgentFallbackOnEmptyOutput(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "true", 5*time.Second)
+
+	if !strings.HasPrefix(result, "🐌 sync ") {
+		t.Errorf("expected heuristic fallback, got %q", result)
+	}
+}
+
+func TestGenerateAgentFallbackOnError(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "exit 1", 5*time.Second)
+
+	if !strings.HasPrefix(result, "🐌 sync ") {
+		t.Errorf("expected heuristic fallback, got %q", result)
+	}
+}
+
+func TestGenerateAgentFallbackOnTimeout(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "sleep 60", 100*time.Millisecond)
+
+	if !strings.HasPrefix(result, "🐌 sync ") {
+		t.Errorf("expected heuristic fallback, got %q", result)
+	}
+}
+
+func TestGenerateAgentNotConsultedForInformativeHeuristic(t *testing.T) {
+	// The heuristic message "add foo.txt" is informative, so the agent must
+	// never run — this is the cost guardrail for small changes.
+	result := GenerateAgent("A\tfoo.txt", "full diff", "/repo", "main", "", "🐌", 1, "echo 'agent wrote this'", 30*time.Second)
+
+	if result != "🐌 add foo.txt" {
+		t.Errorf("GenerateAgent() = %q, want %q", result, "🐌 add foo.txt")
+	}
+}
+
+func TestGenerateAgentReceivesStdin(t *testing.T) {
+	fullDiff := "diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go"
+	agentCmd := `while IFS= read -r line; do
+	case "$line" in
+		repo:*) echo "saw repo" ;;
+		branch:*) echo "saw branch" ;;
+		diff\ --git*) echo "saw diff" ;;
+		prompt*) echo "saw prompt" ;;
+	esac
+done`
+	result := GenerateAgent(agentLowInfoDiff(), fullDiff, "/tmp/repo", "feature", "prompt text here", "🐌", 1, agentCmd, 30*time.Second)
+
+	for _, want := range []string{"saw repo", "saw branch", "saw diff", "saw prompt"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %q in agent output, got %q", want, result)
+		}
+	}
+}
+
+func TestGenerateAgentUsesDefaultPrompt(t *testing.T) {
+	agentCmd := "if grep -q 'imperative subject'; then echo 'default prompt present'; else echo 'default prompt missing'; fi"
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, agentCmd, 30*time.Second)
+
+	if result != "🐌 default prompt present" {
+		t.Errorf("expected default prompt on stdin, got %q", result)
+	}
+}
+
+func TestGenerateAgentCustomPromptOverridesDefault(t *testing.T) {
+	agentCmd := "if grep -q 'house style'; then echo 'custom prompt used'; else echo 'default used'; fi"
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "Use the house style.", "🐌", 1, agentCmd, 30*time.Second)
+
+	if result != "🐌 custom prompt used" {
+		t.Errorf("expected custom prompt on stdin, got %q", result)
+	}
+}
+
+func TestTruncateDiff(t *testing.T) {
+	tests := []struct {
+		name string
+		diff string
+		max  int
+	}{
+		{name: "under cap unchanged", diff: "short diff", max: 100},
+		{name: "empty diff unchanged", diff: "", max: 100},
+		{name: "exactly at cap unchanged", diff: strings.Repeat("a\n", 10), max: 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateDiff(tt.diff, tt.max)
+			if got != tt.diff {
+				t.Errorf("truncateDiff() = %q, want unchanged %q", got, tt.diff)
+			}
+		})
+	}
+
+	t.Run("over cap cut at line boundary with note", func(t *testing.T) {
+		lines := make([]string, 0, 20)
+		for i := 0; i < 20; i++ {
+			lines = append(lines, fmt.Sprintf("line %02d of padding here", i))
+		}
+		diff := strings.Join(lines, "\n") + "\n"
+		got := truncateDiff(diff, 60)
+
+		if !strings.Contains(got, "truncated") {
+			t.Errorf("expected truncation note, got %q", got)
+		}
+		if !strings.HasSuffix(strings.Split(got, "[git-tend")[0], "\n") {
+			t.Errorf("expected cut at line boundary before note, got %q", got)
+		}
+		if !strings.Contains(got, "line 00") {
+			t.Errorf("expected content preserved, got %q", got)
+		}
+	})
+}
+
+func TestRunAgentCapsMessageLength(t *testing.T) {
+	long := strings.Repeat("x", maxAgentMessageRunes+500)
+	got, ok := runAgent("cat", 30*time.Second, long)
+	if !ok {
+		t.Fatal("expected ok output")
+	}
+	if got != strings.Repeat("x", maxAgentMessageRunes) {
+		t.Errorf("expected message capped at %d runes, got %d", maxAgentMessageRunes, len([]rune(got)))
 	}
 }
