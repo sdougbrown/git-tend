@@ -551,12 +551,31 @@ func TestRunAgentWaitDelayDoesNotBlockOnBackgroundedGrandchild(t *testing.T) {
 }
 
 func TestBoundedWriterDiscardsBeyondCap(t *testing.T) {
-	w := &boundedWriter{max: 5}
-	n, err := w.Write([]byte("abcdefgh"))
-	if err != nil || n != 8 {
-		t.Fatalf("Write() = (%d, %v), want (8, nil)", n, err)
-	}
-	if string(w.buf) != "abcde" {
-		t.Errorf("expected only the first 5 bytes buffered, got %q", w.buf)
-	}
+	t.Run("single write", func(t *testing.T) {
+		w := &boundedWriter{max: 5}
+		n, err := w.Write([]byte("abcdefgh"))
+		if err != nil || n != 8 {
+			t.Fatalf("Write() = (%d, %v), want (8, nil)", n, err)
+		}
+		if string(w.buf) != "abcde" {
+			t.Errorf("expected only the first 5 bytes buffered, got %q", w.buf)
+		}
+	})
+
+	t.Run("second write respects remaining room", func(t *testing.T) {
+		w := &boundedWriter{max: 5}
+		if n, err := w.Write([]byte("abc")); err != nil || n != 3 {
+			t.Fatalf("first Write() = (%d, %v), want (3, nil)", n, err)
+		}
+		// The buffer has 2 bytes of room left, so only "de" of the second
+		// write may be kept; a bug in the room computation (e.g. recomputing
+		// room from max without subtracting the first write) would leak
+		// "defg" past the cap.
+		if n, err := w.Write([]byte("defg")); err != nil || n != 4 {
+			t.Fatalf("second Write() = (%d, %v), want (4, nil)", n, err)
+		}
+		if string(w.buf) != "abcde" {
+			t.Errorf("expected buffer to be exactly %q after both writes, got %q", "abcde", w.buf)
+		}
+	})
 }
