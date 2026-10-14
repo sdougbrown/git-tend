@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/git-tend/internal/config"
+	"golang.org/x/sys/unix"
 )
 
 // writeStuckState mimics a daemon-observed stuck transition: it writes both
@@ -20,6 +22,31 @@ func writeStuckState(t *testing.T, stateDir, repoPath, reason string) {
 	t.Helper()
 	if err := writeStuck(stateDir, repoPath, reason, "git commit", 1, "hook blew up\n"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// waitForAgentLock blocks until the in-flight RunStuckAgent holds the
+// per-repo agent lock, proven by a non-blocking flock probe on a
+// separately-opened fd failing with EWOULDBLOCK/EAGAIN. A fixed sleep
+// races: if the agent hasn't reached the lock yet, the test proceeds too
+// early. If the probe succeeds, the agent hasn't locked yet — retry.
+func waitForAgentLock(t *testing.T, stateDir, repoPath string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		f.Close()
+		if err != nil && (errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the agent to acquire the run lock")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -460,7 +487,7 @@ func TestAgentRunLockSerializes(t *testing.T) {
 	go func() {
 		done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
 	}()
-	time.Sleep(200 * time.Millisecond)
+	waitForAgentLock(t, stateDir, repo)
 
 	cfgB := agentTestConfig(markerCmd(marker, 0), nil, 5, "10s")
 	res := RunStuckAgent(context.Background(), repo, cfgB, stateDir, nil)
@@ -510,8 +537,8 @@ func TestAgentDoesNotHoldSyncLock(t *testing.T) {
 		done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
 	}()
 
-	// Give the agent time to enter its command before checking the lock.
-	time.Sleep(200 * time.Millisecond)
+	// Wait until the agent holds the run lock before checking the sync lock.
+	waitForAgentLock(t, stateDir, repo)
 
 	cfgSync := &config.Config{Mode: "read-only", SyncBranch: "main"}
 	result := Sync(context.Background(), repo, cfgSync, stateDir)
