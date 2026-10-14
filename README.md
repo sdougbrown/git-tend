@@ -343,6 +343,16 @@ timeout the heuristic message is used; if the commit then fails (e.g. a
 hook rejects it), the repo is marked stuck and left alone — there is no
 retry-per-tick hammering.
 
+**What the agent command inherits:** the agent runs via `sh -c` as the
+daemon's user with the daemon's **full environment and working directory**
+(git-tend sets no environment or directory override), so anything the
+daemon account can read on that host is reachable from the command. Only
+configure commands you trust with that level of access. Separately, the
+agent sees the **full staged diff**, which may contain secrets — API keys,
+tokens, credentials present in the staged changes — and that content is
+disclosed to whatever process `model_cmd` names. Treat the staged diff as
+shared with the agent command's environment.
+
 **Why this design is safe:** the agent only ever sees the repo and produces
 text. It cannot stage, commit, or push anything: the daemon holds the
 per-repo flock for the whole sync, and every mutation goes through the same

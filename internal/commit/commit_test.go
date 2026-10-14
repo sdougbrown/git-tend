@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestGenerate(t *testing.T) {
@@ -463,24 +464,27 @@ func TestTruncateDiff(t *testing.T) {
 		})
 	}
 
-	t.Run("over cap cut at line boundary with note", func(t *testing.T) {
-		lines := make([]string, 0, 20)
-		for i := 0; i < 20; i++ {
-			lines = append(lines, fmt.Sprintf("line %02d of padding here", i))
+	t.Run("no newline cuts at line boundary", func(t *testing.T) {
+		// A single minified line with no newline in the window: the cut must
+		// still land on a whole-rune boundary (valid UTF-8), not mid-rune.
+		diff := strings.Repeat("é", 30) // 60 bytes, no newline
+		got := truncateDiff(diff, 25)
+		body := strings.TrimSuffix(got, truncationNote(25))
+		if !strings.HasPrefix(diff, body) {
+			t.Errorf("expected cut content to be a prefix of the diff, got %q", body)
 		}
-		diff := strings.Join(lines, "\n") + "\n"
-		got := truncateDiff(diff, 60)
-
-		if !strings.Contains(got, "truncated") {
-			t.Errorf("expected truncation note, got %q", got)
+		if !utf8.ValidString(body) {
+			t.Errorf("expected valid UTF-8 after cut, got %q", body)
 		}
-		if !strings.HasSuffix(strings.Split(got, "[git-tend")[0], "\n") {
-			t.Errorf("expected cut at line boundary before note, got %q", got)
-		}
-		if !strings.Contains(got, "line 00") {
-			t.Errorf("expected content preserved, got %q", got)
+		if got := truncateDiff("\n"+strings.Repeat("a", 30), 10); !strings.HasPrefix(got, "\n") {
+			t.Errorf("expected newline at index 0 to be kept, got %q", got)
 		}
 	})
+}
+
+// truncationNote reconstructs the note truncateDiff appends for a given cap.
+func truncationNote(max int) string {
+	return fmt.Sprintf("[git-tend: diff truncated at %d bytes; the remainder is not shown]\n", max)
 }
 
 func TestRunAgentCapsMessageLength(t *testing.T) {
@@ -491,5 +495,31 @@ func TestRunAgentCapsMessageLength(t *testing.T) {
 	}
 	if got != strings.Repeat("x", maxAgentMessageRunes) {
 		t.Errorf("expected message capped at %d runes, got %d", maxAgentMessageRunes, len([]rune(got)))
+	}
+}
+
+func TestRunAgentStripsNULBytes(t *testing.T) {
+	// NUL bytes make `git commit -m` fail with EINVAL, so the agent's output
+	// must come out clean instead of wedging the repo in a stuck state.
+	got, ok := runAgent(`printf 'msg\000tail'`, 30*time.Second, "")
+	if !ok {
+		t.Fatal("expected ok output")
+	}
+	if strings.ContainsRune(got, '\x00') {
+		t.Errorf("expected NUL bytes stripped, got %q", got)
+	}
+	if got != "msgtail" {
+		t.Errorf("expected NUL removal to join text, got %q", got)
+	}
+}
+
+func TestBoundedWriterDiscardsBeyondCap(t *testing.T) {
+	w := &boundedWriter{max: 5}
+	n, err := w.Write([]byte("abcdefgh"))
+	if err != nil || n != 8 {
+		t.Fatalf("Write() = (%d, %v), want (8, nil)", n, err)
+	}
+	if string(w.buf) != "abcde" {
+		t.Errorf("expected only the first 5 bytes buffered, got %q", w.buf)
 	}
 }

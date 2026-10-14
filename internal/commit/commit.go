@@ -29,6 +29,11 @@ const MaxAgentDiffBytes = 16 * 1024
 // the 72-rune subject cap does not apply; this only stops pathological output.
 const maxAgentMessageRunes = 2000
 
+// maxAgentStdoutBytes bounds how much agent stdout the daemon will buffer.
+// 2000 runes can never exceed 8000 bytes of UTF-8, so this always covers the
+// message cap while a runaway agent command cannot grow the daemon's memory.
+const maxAgentStdoutBytes = maxAgentMessageRunes * 4
+
 // DefaultAgentPrompt is the built-in prompt used when a repo opts into the
 // agent strategy without configuring its own model_prompt. It names the
 // stdin content explicitly: models that aren't told what stdin holds often
@@ -230,10 +235,39 @@ func truncateDiff(diff string, max int) string {
 		return diff
 	}
 	cut := diff[:max]
-	if idx := strings.LastIndexByte(cut, '\n'); idx > 0 {
+	if idx := strings.LastIndexByte(cut, '\n'); idx >= 0 {
 		cut = cut[:idx+1]
+	} else {
+		// No newline in the window (a single minified line): cut at a whole
+		// rune boundary so the result is still valid UTF-8.
+		for len(cut) > 0 {
+			r, size := utf8.DecodeLastRuneInString(cut)
+			if r != utf8.RuneError || size != 1 {
+				break
+			}
+			cut = cut[:len(cut)-1]
+		}
 	}
 	return cut + fmt.Sprintf("[git-tend: diff truncated at %d bytes; the remainder is not shown]\n", max)
+}
+
+// boundedWriter stores up to max bytes and silently discards the rest, so a
+// runaway command writing far more than the message cap cannot buffer
+// unbounded output in the daemon's memory.
+type boundedWriter struct {
+	buf []byte
+	max int
+}
+
+func (w *boundedWriter) Write(p []byte) (int, error) {
+	room := w.max - len(w.buf)
+	if room > 0 {
+		if room > len(p) {
+			room = len(p)
+		}
+		w.buf = append(w.buf, p[:room]...)
+	}
+	return len(p), nil
 }
 
 func runAgent(agentCmd string, timeout time.Duration, stdin string) (string, bool) {
@@ -245,12 +279,22 @@ func runAgent(agentCmd string, timeout time.Duration, stdin string) (string, boo
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", agentCmd)
 	cmd.Stdin = strings.NewReader(stdin)
-	out, err := cmd.Output()
-	if err != nil {
+	var out boundedWriter
+	out.max = maxAgentStdoutBytes
+	cmd.Stdout = &out
+	// Without WaitDelay, a grandchild of sh that outlives it and holds the
+	// stdout pipe would keep Wait blocked past the context deadline while the
+	// per-repo flock is held; WaitDelay closes the pipes and returns instead.
+	cmd.WaitDelay = 5 * time.Second
+	if err := cmd.Run(); err != nil {
 		return "", false
 	}
 
-	result := strings.TrimSpace(string(out))
+	// NUL bytes are invalid in a git commit message (git commit -m fails with
+	// EINVAL), so strip them and fall back via the emptiness check if nothing
+	// usable remains.
+	result := strings.ReplaceAll(string(out.buf), "\x00", "")
+	result = strings.TrimSpace(result)
 	if result == "" {
 		return "", false
 	}
@@ -267,6 +311,7 @@ func runModel(modelCmd string, modelTimeout time.Duration, modelStdin string) (s
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", modelCmd)
 	cmd.Stdin = strings.NewReader(modelStdin)
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
