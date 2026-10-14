@@ -216,7 +216,11 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 			if prompt == "" {
 				prompt = commit.DefaultAgentPrompt
 			}
-			fullDiff, fullErr := git.DiffCached(repoPath)
+			// Cap the read at the source so a large staged diff cannot buffer
+			// unbounded bytes in the daemon. The +1 keeps an oversized diff
+			// strictly over MaxAgentDiffBytes so truncateDiff's truncation note
+			// still reaches the agent.
+			fullDiff, fullErr := git.DiffCachedMax(repoPath, commit.MaxAgentDiffBytes+1)
 			if fullErr != nil {
 				msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
 				break

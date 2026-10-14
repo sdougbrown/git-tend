@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,6 +144,40 @@ func run(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return string(out)
+}
+
+func TestDiffCachedMaxCapsAtSource(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+
+	// Stage a file whose diff is well over the cap. No commit is needed:
+	// `git diff --cached` compares the index against the empty tree.
+	big := strings.Repeat("line of change content\n", 1000) // ~22 KiB
+	if err := os.WriteFile(filepath.Join(repo, "big.txt"), []byte(big), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "add", "big.txt")
+
+	const cap = 1024
+	got, err := DiffCachedMax(repo, cap)
+	if err != nil {
+		t.Fatalf("DiffCachedMax() error: %v", err)
+	}
+	if len(got) != cap {
+		t.Errorf("DiffCachedMax() returned %d bytes, want exactly %d (the cap)", len(got), cap)
+	}
+
+	// The capped output must be a prefix of the full diff.
+	full, err := DiffCached(repo)
+	if err != nil {
+		t.Fatalf("DiffCached() error: %v", err)
+	}
+	if len(full) <= cap {
+		t.Fatalf("test setup: expected full diff > cap, got %d bytes", len(full))
+	}
+	if !strings.HasPrefix(full, got) {
+		t.Errorf("DiffCachedMax() output is not a prefix of the full diff")
+	}
 }
 
 func TestIsNetworkError(t *testing.T) {

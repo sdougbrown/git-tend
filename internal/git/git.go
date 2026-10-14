@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -93,6 +94,31 @@ func DiffCached(repoPath string) (string, error) {
 	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached")
 	out, err := cmd.Output()
 	return string(out), err
+}
+
+// DiffCachedMax is like DiffCached but buffers at most maxBytes of the staged
+// diff, so a large staged change cannot grow the daemon's memory before the
+// caller caps it. The read stops at maxBytes and the remainder of the pipe is
+// drained so git can exit.
+func DiffCachedMax(repoPath string, maxBytes int) (string, error) {
+	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if _, err := io.CopyN(&buf, stdout, int64(maxBytes)); err != nil && err != io.EOF {
+		return "", err
+	}
+	// Drain the remainder so git can exit; the daemon keeps at most maxBytes.
+	io.Copy(io.Discard, stdout)
+	if err := cmd.Wait(); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func GitDir(repoPath string) (string, error) {
