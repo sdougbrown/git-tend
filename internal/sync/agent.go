@@ -109,6 +109,51 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return res
 	}
 
+	// An un-Parsed config (tests, direct callers) leaves MaxAttempts at 0,
+	// which would make the cap below permanently disable the agent; apply the
+	// same default config.Parse does.
+	maxAttempts := agent.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultAgentMaxAttempts
+	}
+
+	recordPath := AgentStatePath(stateDir, repoPath)
+
+	// Serialize the provenance check, the run, and the cleanup under the
+	// per-repo agent lock. writeStuck takes the same lock, so a concurrent
+	// stuck episode is refused rather than interleaved with this run's
+	// cleanup — the flag/record verified here can't be replaced by a fresh
+	// episode mid-run. A flock (not a PID/timestamp marker) so no stale-
+	// marker liveness heuristics are needed. The fd is shared with the agent
+	// command itself (cmd.ExtraFiles below), so a run orphaned by a daemon
+	// restart keeps holding the lock until the whole process group exits — a
+	// replacement daemon then can't start a second concurrent run on the same
+	// repo.
+	lock, err := AcquireAgentLock(stateDir, repoPath)
+	if err != nil {
+		if logger != nil {
+			logger.Debug("agent unstick: another agent run is in flight", "repo", repoPath)
+		}
+		// Report the same fail-closed budget the non-contended path would:
+		// an unparseable record must not surface as a fresh (0-attempt) one.
+		if att, rerr := readAgentAttempt(recordPath); rerr != nil {
+			res.Attempts = maxAttempts
+		} else {
+			res.Attempts = att.Attempts
+		}
+		return res
+	}
+	defer lock.Close()
+
+	// Read the flag and the daemon-issued record under the lock, and verify
+	// provenance under the lock: the record must exist, its stuck_at must
+	// match the flag's, and the record's (authoritative) reason must be
+	// allowed. The repo-local file can be forged by anything that can write
+	// to the repo, so only act when the file's stuck_at matches a record the
+	// daemon itself wrote, and treat the daemon-observed reason — not the
+	// file's — as authoritative for the allowlist. Reading under the lock
+	// means a concurrent writeStuck can't replace the flag/record between the
+	// check and the cleanup.
 	stuck, err := readStuckFile(repoPath)
 	if err != nil {
 		// No flag or unparsable contents: nothing to recover from.
@@ -118,10 +163,6 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return res
 	}
 
-	// Provenance: the repo-local file can be forged by anything that can write
-	// to the repo. Only act when the file's stuck_at matches a record the
-	// daemon itself wrote, and treat the daemon-observed reason — not the
-	// file's — as authoritative for the allowlist.
 	rec, err := readStuckRecord(StuckRecordPath(stateDir, repoPath))
 	if err != nil || rec.StuckAt != stuck.StuckAt {
 		if logger != nil {
@@ -138,38 +179,8 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 
 	// From here on the agent is engaged with this stuck episode; status may
-	// show the attempt budget. An un-Parsed config (tests, direct callers)
-	// leaves MaxAttempts at 0, which would make the cap below permanently
-	// disable the agent; apply the same default config.Parse does.
-	maxAttempts := agent.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = defaultAgentMaxAttempts
-	}
+	// show the attempt budget.
 	res.MaxAttempts = maxAttempts
-
-	recordPath := AgentStatePath(stateDir, repoPath)
-
-	// Serialize agent runs per repo. A flock (not a PID/timestamp marker) so
-	// no stale-marker liveness heuristics are needed. The fd is shared with
-	// the agent command itself (cmd.ExtraFiles below), so a run orphaned by a
-	// daemon restart keeps holding the lock until the whole process group
-	// exits — the replacement daemon then can't start a second concurrent
-	// run on the same repo.
-	lock, err := AcquireAgentLock(stateDir, repoPath)
-	if err != nil {
-		if logger != nil {
-			logger.Debug("agent unstick: another agent run is in flight", "repo", repoPath)
-		}
-		// Report the same fail-closed budget the non-contended path would:
-		// an unparseable record must not surface as a fresh (0-attempt) one.
-		if att, rerr := readAgentAttempt(recordPath); rerr != nil {
-			res.Attempts = maxAttempts
-		} else {
-			res.Attempts = att.Attempts
-		}
-		return res
-	}
-	defer lock.Close()
 
 	record, err := readAgentAttempt(recordPath)
 	if err != nil {
@@ -249,7 +260,12 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		if err := writeAgentAttempt(recordPath, record); err != nil && logger != nil {
 			logger.Error("agent unstick: saving attempt record after recovery", "repo", repoPath, "error", err)
 		}
-		if err := os.Remove(filepath.Join(repoPath, ".gittend.stuck")); err != nil && !os.IsNotExist(err) {
+		// Re-verify the flag's stuck_at still matches the verified record
+		// before deleting it (compare-and-delete, like the record): a flag
+		// that no longer belongs to this episode must not be deleted here.
+		// The agent lock refuses a concurrent writeStuck, so the flag can't
+		// be replaced mid-run; the stuck_at comparison is defence in depth.
+		if err := removeStuckFlagIfCurrent(repoPath, rec.StuckAt); err != nil && !os.IsNotExist(err) {
 			res.Err = fmt.Errorf("exit 0 but removing stuck flag: %w", err)
 			return res
 		}
@@ -286,6 +302,28 @@ func removeStuckRecordIfCurrent(stateDir, repoPath, stuckAt string) {
 		return
 	}
 	_ = os.Remove(path)
+}
+
+// removeStuckFlagIfCurrent deletes the repo-local stuck flag only if its
+// stuck_at still belongs to the episode the caller acted on. A flag that no
+// longer matches must not be deleted here — that would swallow a fresh
+// episode's flag and orphan its record. Callers hold the agent lock, which
+// refuses a concurrent writeStuck, so the flag can't be replaced mid-run; the
+// stuck_at comparison is defence in depth.
+func removeStuckFlagIfCurrent(repoPath, stuckAt string) error {
+	stuck, err := readStuckFile(repoPath)
+	if err != nil {
+		// Absent flag: already gone, nothing to delete.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if stuck.StuckAt != stuckAt {
+		// The flag no longer belongs to this episode; don't delete it.
+		return nil
+	}
+	return os.Remove(filepath.Join(repoPath, ".gittend.stuck"))
 }
 
 // defaultAgentMaxAttempts mirrors the default config.Parse applies; RunStuckAgent

@@ -494,10 +494,11 @@ func TestAgentRunLockSerializes(t *testing.T) {
 	if res.Ran {
 		t.Error("second agent run should not start while the first holds the lock")
 	}
-	// Engaged-but-blocked: the budget is visible (MaxAttempts set) even
-	// though the run did not start, so status shows the pending budget.
-	if res.MaxAttempts != 5 {
-		t.Errorf("blocked run: MaxAttempts = %d, want 5", res.MaxAttempts)
+	// Blocked: the run did not start, so the agent is not engaged and no
+	// budget is reported — the provenance check happens under the lock, which
+	// the in-flight run holds.
+	if res.MaxAttempts != 0 {
+		t.Errorf("blocked run: MaxAttempts = %d, want 0 (not engaged)", res.MaxAttempts)
 	}
 	if markerRuns(t, marker) != 0 {
 		t.Error("second agent command should not have executed")
@@ -689,6 +690,92 @@ func TestWriteStuckRefusesWhileAgentLockHeld(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
 		t.Error("stuck flag should exist after a successful writeStuck")
+	}
+}
+
+// A writeStuck racing an in-flight agent run (which holds the agent lock)
+// must fail and leave the existing flag and provenance record intact — it
+// must not overwrite them with a fresh episode that the run's cleanup would
+// then mis-delete.
+func TestWriteStuckRefusesAndLeavesFilesIntactWhileAgentLockHeld(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	// Write the initial flag + record (episode 1).
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	flagBefore, err := os.ReadFile(filepath.Join(repo, ".gittend.stuck"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordBefore, err := os.ReadFile(StuckRecordPath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the agent lock (simulating an in-flight agent run).
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	// A concurrent writeStuck must fail.
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom2"); err == nil {
+		t.Fatal("writeStuck must fail while the agent lock is held")
+	}
+
+	// The existing flag and record must be left intact.
+	flagAfter, err := os.ReadFile(filepath.Join(repo, ".gittend.stuck"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(flagAfter) != string(flagBefore) {
+		t.Error("writeStuck modified the existing flag while the lock was held")
+	}
+	recordAfter, err := os.ReadFile(StuckRecordPath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(recordAfter) != string(recordBefore) {
+		t.Error("writeStuck modified the existing record while the lock was held")
+	}
+}
+
+// removeStuckFlagIfCurrent is the compare-and-delete the recovery path uses
+// to clear the flag: it deletes only when the flag's stuck_at still matches
+// the verified record, so a flag that no longer belongs to the episode is
+// left in place.
+func TestRemoveStuckFlagIfCurrent(t *testing.T) {
+	repo := t.TempDir()
+	flagPath := filepath.Join(repo, ".gittend.stuck")
+
+	// Matching stuck_at: the flag is deleted.
+	if err := os.WriteFile(flagPath, []byte("stuck_at = \"X\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStuckFlagIfCurrent(repo, "X"); err != nil {
+		t.Fatalf("removeStuckFlagIfCurrent: %v", err)
+	}
+	if _, err := os.Stat(flagPath); !os.IsNotExist(err) {
+		t.Error("flag should be deleted when the stuck_at matches")
+	}
+
+	// Mismatched stuck_at: the flag is not deleted.
+	if err := os.WriteFile(flagPath, []byte("stuck_at = \"X\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStuckFlagIfCurrent(repo, "Y"); err != nil {
+		t.Fatalf("removeStuckFlagIfCurrent: %v", err)
+	}
+	if _, err := os.Stat(flagPath); err != nil {
+		t.Error("flag should not be deleted when the stuck_at mismatches")
+	}
+
+	// Absent flag: no error (already gone).
+	if err := removeStuckFlagIfCurrent(repo, "X"); err != nil {
+		t.Fatalf("removeStuckFlagIfCurrent on absent flag: %v", err)
 	}
 }
 
