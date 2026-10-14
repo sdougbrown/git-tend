@@ -133,6 +133,31 @@ func TestAgentAllowlistFiltering(t *testing.T) {
 	}
 }
 
+func TestAgentMaxAttemptsOnlyWhenEngaged(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	cfg := agentTestConfig(markerCmd(marker, 0), nil, 2, "10s")
+
+	// Agent configured but no stuck file: not engaged, no budget to show.
+	if res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil); res.MaxAttempts != 0 {
+		t.Errorf("MaxAttempts = %d with no stuck file, want 0", res.MaxAttempts)
+	}
+
+	// Stuck, but the daemon-observed reason is not allowed: not engaged.
+	writeStuckState(t, stateDir, repo, "rebase_conflict")
+	if res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil); res.MaxAttempts != 0 {
+		t.Errorf("MaxAttempts = %d for a never-allowed reason, want 0", res.MaxAttempts)
+	}
+
+	// Engaged: the budget is reported, and the first attempt is spent.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if res.MaxAttempts != 2 || res.Attempts != 1 {
+		t.Errorf("got MaxAttempts=%d Attempts=%d, want 2/1", res.MaxAttempts, res.Attempts)
+	}
+}
+
 func TestOversizedStuckFileIsIgnored(t *testing.T) {
 	repo := t.TempDir()
 	stateDir := t.TempDir()

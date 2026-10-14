@@ -60,7 +60,9 @@ type AgentRunResult struct {
 	Recovered bool
 	// Attempts is the attempt count for the current episode after this run.
 	Attempts int
-	// MaxAttempts is the configured cap, 0 when the agent is not configured.
+	// MaxAttempts is the configured cap. It is 0 unless the agent is engaged
+	// with a valid stuck episode (provenance verified, reason allowed), so
+	// status never claims an agent is pending when it isn't.
 	MaxAttempts int
 	// Err is the command's error, when the run failed.
 	Err error
@@ -92,7 +94,7 @@ func StuckRecordPath(stateDir, repoPath string) string {
 // daemon's tick loop is the only caller and it is single-threaded.
 func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, stateDir string, logger *slog.Logger) AgentRunResult {
 	agent := cfg.Agent
-	res := AgentRunResult{MaxAttempts: agent.MaxAttempts}
+	var res AgentRunResult
 
 	if !agent.Enabled() {
 		return res
@@ -125,6 +127,10 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		}
 		return res
 	}
+
+	// From here on the agent is engaged with this stuck episode; status may
+	// show the attempt budget.
+	res.MaxAttempts = agent.MaxAttempts
 
 	recordPath := AgentStatePath(stateDir, repoPath)
 	record := readAgentAttempt(recordPath)
