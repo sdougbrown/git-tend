@@ -353,6 +353,18 @@ tokens, credentials present in the staged changes — and that content is
 disclosed to whatever process `model_cmd` names. Treat the staged diff as
 shared with the agent command's environment.
 
+**Trusted configuration:** `.gittend` is trusted configuration, and the
+strategies inherit that trust. The agent strategy executes `model_cmd` via
+`sh -c` with the full staged diff on stdin, and `model_cmd` is loaded from
+the per-repo `.gittend` — so anyone who can write a `.gittend` file into a
+scanned repo achieves command execution on the host, with the full diff
+(which may contain secrets) exposed to that command. This is the same trust
+model as the `model` strategy, but the agent path widens the surface: it
+triggers automatically when the heuristic message is low-information and
+sends the full cached diff. Treat write access to `.gittend` like write
+access to the daemon's privileges, and consider who can write it in the
+repos you opt in (collaborators, cloned repos).
+
 **Why this design is safe:** the agent only ever sees the repo and produces
 text. It cannot stage, commit, or push anything: the daemon holds the
 per-repo flock for the whole sync, and every mutation goes through the same
