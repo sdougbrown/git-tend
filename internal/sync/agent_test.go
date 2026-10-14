@@ -403,7 +403,7 @@ func TestAgentTimeout(t *testing.T) {
 	if res.Recovered {
 		t.Fatal("timed-out command must not count as recovery")
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("timeout not enforced, took %s", elapsed)
 	}
 	if res.Attempts != 1 {
@@ -434,10 +434,14 @@ func TestAgentTimeoutKillsProcessGroup(t *testing.T) {
 		t.Fatal("timed-out command must not count as recovery")
 	}
 
-	// Give any surviving orphan ample time to write the marker.
-	time.Sleep(1500 * time.Millisecond)
-	if markerRuns(t, marker) != 0 {
-		t.Error("shell's child survived the timeout; process group was not killed")
+	// Poll for the marker: a surviving orphan writes it after its sleep.
+	// If it appears within the window, the process group was not killed.
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if markerRuns(t, marker) != 0 {
+			t.Fatal("shell's child survived the timeout; process group was not killed")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -462,6 +466,11 @@ func TestAgentRunLockSerializes(t *testing.T) {
 	res := RunStuckAgent(context.Background(), repo, cfgB, stateDir, nil)
 	if res.Ran {
 		t.Error("second agent run should not start while the first holds the lock")
+	}
+	// Engaged-but-blocked: the budget is visible (MaxAttempts set) even
+	// though the run did not start, so status shows the pending budget.
+	if res.MaxAttempts != 5 {
+		t.Errorf("blocked run: MaxAttempts = %d, want 5", res.MaxAttempts)
 	}
 	if markerRuns(t, marker) != 0 {
 		t.Error("second agent command should not have executed")
