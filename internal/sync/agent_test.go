@@ -180,9 +180,19 @@ func TestOversizedStuckFileIsIgnored(t *testing.T) {
 }
 
 func TestAgentExitZeroRecovers(t *testing.T) {
-	repo := t.TempDir()
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
 	stateDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "marker")
+
+	// The clone of an empty remote has an unborn HEAD; commit the .gittend
+	// file so the repo is on main and syncable.
+	writeTestConfig(t, repo, "read-only", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "-u", "origin", "main")
 
 	writeStuckState(t, stateDir, repo, "hook_failed")
 	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
@@ -199,10 +209,11 @@ func TestAgentExitZeroRecovers(t *testing.T) {
 		t.Error("provenance record should be removed on recovery")
 	}
 
-	// Recovery means the next sync proceeds instead of skipping on the flag.
+	// Recovery means the next sync proceeds and actually succeeds — a TempDir
+	// would fail at CurrentBranch and make this assertion vacuously pass.
 	cfg := &config.Config{Mode: "read-only", SyncBranch: "main"}
-	if result := Sync(context.Background(), repo, cfg, stateDir); result.State == "skipped" && result.Error == "stuck flag exists" {
-		t.Error("sync still skipped on stuck flag after agent recovery")
+	if result := Sync(context.Background(), repo, cfg, stateDir); result.State != "ok" {
+		t.Errorf("sync after agent recovery: got %s (%s), want ok", result.State, result.Error)
 	}
 }
 
