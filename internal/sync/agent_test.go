@@ -248,6 +248,32 @@ func TestAgentTimeout(t *testing.T) {
 	}
 }
 
+func TestAgentTimeoutKillsProcessGroup(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	// The shell outlives the sleep, so the sleep (and the marker write) is a
+	// grandchild. A timeout that kills only the sh wrapper leaves the
+	// grandchild running; a process-group kill must not.
+	cfg := agentTestConfig("sleep 1; echo ran >> "+marker, nil, 2, "100ms")
+
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran {
+		t.Fatal("expected agent to run")
+	}
+	if res.Recovered {
+		t.Fatal("timed-out command must not count as recovery")
+	}
+
+	// Give any surviving orphan ample time to write the marker.
+	time.Sleep(1500 * time.Millisecond)
+	if markerRuns(t, marker) != 0 {
+		t.Error("grandchild survived the timeout; process group was not killed")
+	}
+}
+
 // The agent run must not hold the per-repo flock: while it runs, another sync
 // must be able to acquire the lock. The sync still skips on the stuck flag,
 // but only after taking the lock — "locked" would mean the agent held it.

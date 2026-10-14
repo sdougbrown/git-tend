@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -144,6 +146,20 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", agent.OnStuckCmd)
 	cmd.Dir = repoPath
 	cmd.WaitDelay = 10 * time.Second
+	// Run the command in its own process group and kill the whole group on
+	// timeout: a `sh -c` wrapper often leaves the real agent running as a
+	// child (or grandchild), and killing only the shell would orphan it —
+	// still running with daemon privileges.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return os.ErrProcessDone
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		res.Err = err
