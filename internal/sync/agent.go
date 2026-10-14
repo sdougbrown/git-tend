@@ -43,9 +43,13 @@ type stuckRecord struct {
 	WrittenAt string `json:"written_at"`
 }
 
-// agentAttempt is the per-repo attempt counter for the current stuck episode,
-// persisted in the state dir so it survives daemon restarts. Episode is the
-// stuck_at of the daemon-issued stuck record the counter applies to.
+// agentAttempt is the per-repo attempt counter, persisted in the state dir so
+// it survives daemon restarts. The budget is cumulative for the repo, not per
+// stuck file: it resets only when a sync actually succeeds or a human runs
+// `git-tend unstick`. An agent exit 0 alone doesn't reset it — otherwise an
+// agent that clears the flag without actually fixing the repo would re-arm a
+// full budget on every failed sync. Episode records the stuck_at of the last
+// episode seen, for diagnostics only.
 type agentAttempt struct {
 	Episode      string `json:"episode"`
 	Attempts     int    `json:"attempts"`
@@ -154,10 +158,11 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	defer lock.Close()
 
 	record := readAgentAttempt(recordPath)
-	if record.Episode != stuck.StuckAt {
-		// New stuck file: new episode, counter starts fresh.
-		record = agentAttempt{Episode: stuck.StuckAt}
-	}
+	// The budget is per repo, not per stuck file: a new episode — even one
+	// created right after the agent's own exit 0 — does not reset the
+	// counter. Rewriting stuck_at can't help an attacker either: the
+	// provenance match gates whether the agent runs at all, and the counter
+	// only resets on a successful sync or a human unstick.
 	res.Attempts = record.Attempts
 	if record.Attempts >= agent.MaxAttempts {
 		if logger != nil {
@@ -200,19 +205,20 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	runErr := cmd.Run()
 	record.Attempts++
 	record.LastRunAt = time.Now().UTC().Format(time.RFC3339)
-	record.Episode = stuck.StuckAt
+	record.Episode = rec.StuckAt
 	res.Attempts = record.Attempts
 
 	if runErr == nil {
 		// Recovery: clear the flag and the provenance record so the next tick
-		// syncs normally, and a future episode starts from zero.
+		// syncs normally. The attempt counter is deliberately kept: an exit 0
+		// that doesn't actually fix the repo must not re-arm a full budget on
+		// the next failed sync. A successful sync clears it instead.
 		if err := os.Remove(filepath.Join(repoPath, ".gittend.stuck")); err != nil && !os.IsNotExist(err) {
 			res.Err = fmt.Errorf("exit 0 but removing stuck flag: %w", err)
 			_ = writeAgentAttempt(recordPath, record)
 			return res
 		}
 		_ = os.Remove(StuckRecordPath(stateDir, repoPath))
-		_ = os.Remove(recordPath)
 		res.Recovered = true
 		if logger != nil {
 			logger.Info("agent unstick: recovered", "repo", repoPath, "reason", stuck.Reason)

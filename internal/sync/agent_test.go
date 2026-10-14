@@ -217,8 +217,7 @@ func TestAgentExitZeroRecovers(t *testing.T) {
 	}
 }
 
-func TestAgentAttemptCap(t *testing.T) {
-	repo := t.TempDir()
+func TestAgentAttemptCap(t *testing.T) {	repo := t.TempDir()
 	stateDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "marker")
 
@@ -250,11 +249,60 @@ func TestAgentAttemptCap(t *testing.T) {
 		t.Errorf("command ran %d times, want 2", runs)
 	}
 
-	// A new episode (a fresh daemon-issued record) resets the counter.
+	// A new episode (a fresh daemon-issued record) does NOT reset the counter:
+	// the budget is per repo, and only a successful sync or a human unstick
+	// clears it. Otherwise an agent that recovers without fixing anything
+	// would re-arm itself on every failed sync.
 	writeStuckState(t, stateDir, repo, "hook_failed")
 	res = RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if res.Ran {
+		t.Fatal("a fresh stuck episode should not re-arm a spent budget")
+	}
+	if runs := markerRuns(t, marker); runs != 2 {
+		t.Errorf("command ran %d times, want 2", runs)
+	}
+
+	// A successful sync is what resets the budget (the flag is gone by then,
+	// so the repo actually recovers).
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	syncable := gitClone(t, remote)
+	defer os.RemoveAll(syncable)
+	writeTestConfig(t, syncable, "read-only", "main", "", nil, nil)
+	testGitOK(t, syncable, "add", ".gittend")
+	testGitOK(t, syncable, "commit", "-m", "initial config")
+	testGitOK(t, syncable, "push", "-u", "origin", "main")
+
+	writeStuckState(t, stateDir, syncable, "hook_failed")
+	res = RunStuckAgent(context.Background(), syncable, cfg, stateDir, nil)
+	if !res.Ran || res.Recovered || res.Attempts != 1 {
+		t.Fatalf("expected failed run on the syncable repo, got ran=%v recovered=%v attempts=%d", res.Ran, res.Recovered, res.Attempts)
+	}
+	if _, err := os.Stat(AgentStatePath(stateDir, syncable)); err != nil {
+		t.Fatal("attempt record should exist before the successful sync")
+	}
+
+	// Fail-then-succeed in one episode: the recovery keeps the record (only
+	// the flag and the provenance record are cleared), and the record is
+	// finally removed by the successful sync that follows.
+	cfgOK := agentTestConfig("exit 0", nil, 2, "10s")
+	res = RunStuckAgent(context.Background(), syncable, cfgOK, stateDir, nil)
+	if !res.Ran || !res.Recovered || res.Attempts != 2 {
+		t.Fatalf("expected successful recovery, got ran=%v recovered=%v attempts=%d", res.Ran, res.Recovered, res.Attempts)
+	}
+	if _, err := os.Stat(AgentStatePath(stateDir, syncable)); err != nil {
+		t.Fatal("recovery should keep the attempt record (budget is not re-armed)")
+	}
+	if result := Sync(context.Background(), syncable, &config.Config{Mode: "read-only", SyncBranch: "main"}, stateDir); result.State != "ok" {
+		t.Fatalf("sync: got %s (%s), want ok", result.State, result.Error)
+	}
+	if _, err := os.Stat(AgentStatePath(stateDir, syncable)); !os.IsNotExist(err) {
+		t.Error("a successful sync should reset the attempt record")
+	}
+	writeStuckState(t, stateDir, syncable, "hook_failed")
+	res = RunStuckAgent(context.Background(), syncable, cfgOK, stateDir, nil)
 	if !res.Ran || res.Attempts != 1 {
-		t.Fatalf("new episode should reset attempts, got ran=%v attempts=%d", res.Ran, res.Attempts)
+		t.Fatalf("expected a fresh budget after a successful sync, got ran=%v attempts=%d", res.Ran, res.Attempts)
 	}
 }
 

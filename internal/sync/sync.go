@@ -81,15 +81,17 @@ func sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir str
 		result = syncReadWrite(ctx, repoPath, cfg, stateDir, timeout, bypassDebounce, branch)
 	}
 	if result.State == "ok" {
-		clearStuckRecord(stateDir, repoPath)
+		clearAgentState(stateDir, repoPath)
 	}
 	return result
 }
 
-// clearStuckRecord drops the daemon-issued provenance record once the stuck
-// episode is over (a successful sync means the flag is gone). Errors are
-// ignored: a stale record fails safe — the agent just won't run.
-func clearStuckRecord(stateDir, repoPath string) {
+// clearAgentState drops the agent state once a stuck episode is truly over: a
+// successful sync means the flag is gone and the repo syncs, so the attempt
+// budget and the daemon-issued provenance record are both reset. Errors are
+// ignored: stale state fails safe — the agent just won't run.
+func clearAgentState(stateDir, repoPath string) {
+	_ = os.Remove(AgentStatePath(stateDir, repoPath))
 	_ = os.Remove(StuckRecordPath(stateDir, repoPath))
 }
 

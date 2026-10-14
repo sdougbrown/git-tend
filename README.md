@@ -326,8 +326,9 @@ on_stuck_cmd = ""
 # rebase_conflict, other.
 allowed_reasons = ["hook_failed", "push_rejected", "other"]
 
-# Maximum agent runs per stuck episode. Once reached, the repo stays stuck
-# until a human runs 'git-tend unstick'.
+# Maximum agent runs before the repo stays stuck for a human. The counter is
+# per repo: it resets when a sync succeeds or when 'git-tend unstick' runs,
+# not when the agent merely exits 0.
 max_attempts = 2
 
 # Hard kill for the agent run.
@@ -488,10 +489,9 @@ on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below 
 
 - When the daemon marks a repo stuck and the reason is in `allowed_reasons`, it runs `on_stuck_cmd` (via `sh -c`, with the repo as working directory) with a context document on stdin: the stuck file contents (reason, failing command, exit code, output) plus the repo path and sync branch.
 - **Provenance:** the `.gittend.stuck` file in the repo is untrusted input — anything that can write to the repo can forge one. Whenever the daemon writes the flag, it also writes a matching record to its own state dir (the `stuck_at` timestamp and the reason it observed). The agent only runs when the file's `stuck_at` matches a daemon-issued record, and the allowlist is applied to the daemon-observed reason — not the reason in the file. A forged flag file never triggers the agent, and a forged reason can't bypass the allowlist.
-- **Exit 0** → the daemon removes the `.gittend.stuck` flag and logs the recovery; the next tick syncs normally.
-- **Non-zero exit or timeout** → the stuck flag stays and the attempt counter increments. The agent is retried on a later tick until `max_attempts` is reached for that stuck episode.
-- Once `max_attempts` is reached, the repo is permanently stuck until a human runs `git-tend unstick` (which resets the counter). This bounds the agent's budget per episode and prevents an unstick→stuck→unstick loop every tick.
-- The agent run is not counted per sync attempt forever: a fresh stuck episode (a new `.gittend.stuck` written after a successful sync) starts with a full budget again.
+- **Exit 0** → the daemon removes the `.gittend.stuck` flag and logs the recovery; the next tick syncs normally. The attempt counter is kept.
+- **Non-zero exit or timeout** → the stuck flag stays and the attempt counter increments. The agent is retried on a later tick until `max_attempts` is reached for the repo.
+- The budget is per repo, not per stuck episode: it resets only when a sync actually succeeds or a human runs `git-tend unstick`. An agent exit 0 alone doesn't reset it — if the agent clears the flag without actually fixing the repo, the next failed sync can't re-arm a full budget. This is what makes "permanently stuck until a human (or a real fix)" hold.
 - `status` shows the state: `stuck (agent pending, attempts 1/2)` or `stuck (agent exhausted, attempts 2/2)`.
 
 ### Safety notes
