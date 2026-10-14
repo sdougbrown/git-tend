@@ -80,10 +80,16 @@ func removeStuckFlag(repoPath string) error {
 		return fmt.Errorf("removing stuck flag: %w", err)
 	}
 
-	// Reset the agent attempt counter so a fresh stuck episode starts with a
-	// full budget of attempts.
-	if err := os.Remove(gitSync.AgentStatePath(paths.StateDir(), repoPath)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("resetting agent attempt record: %w", err)
+	// Reset the agent attempt counter and the daemon-issued stuck record so a
+	// fresh stuck episode starts with a full budget of attempts.
+	stateDir := paths.StateDir()
+	for _, path := range []string{
+		gitSync.AgentStatePath(stateDir, repoPath),
+		gitSync.StuckRecordPath(stateDir, repoPath),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("resetting agent state: %w", err)
+		}
 	}
 
 	fmt.Printf("unstuck %s\n", repoPath)

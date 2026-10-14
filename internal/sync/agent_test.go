@@ -12,7 +12,18 @@ import (
 	"github.com/sdougbrown/git-tend/internal/config"
 )
 
-func writeStuckFile(t *testing.T, repoPath, reason string) {
+// writeStuckState mimics a daemon-observed stuck transition: it writes both
+// the repo-local flag and the matching daemon-issued provenance record.
+func writeStuckState(t *testing.T, stateDir, repoPath, reason string) {
+	t.Helper()
+	if err := writeStuck(stateDir, repoPath, reason, "git commit", 1, "hook blew up\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeForgedStuckFile writes only the repo-local flag, without a matching
+// daemon-issued record — what a malicious repo could do on its own.
+func writeForgedStuckFile(t *testing.T, repoPath, reason string) {
 	t.Helper()
 	content := "stuck_at = \"2026-01-01T00:00:00Z\"\n" +
 		"reason = \"" + reason + "\"\n" +
@@ -24,8 +35,9 @@ func writeStuckFile(t *testing.T, repoPath, reason string) {
 	}
 }
 
-// rewriteStuckAt starts a new stuck episode by changing stuck_at.
-func rewriteStuckAt(t *testing.T, repoPath, stuckAt string) {
+// rewriteStuckReason rewrites the reason in the repo-local flag, leaving the
+// daemon-issued record (and its stuck_at) untouched.
+func rewriteStuckReason(t *testing.T, repoPath, reason string) {
 	t.Helper()
 	path := filepath.Join(repoPath, ".gittend.stuck")
 	data, err := os.ReadFile(path)
@@ -33,7 +45,7 @@ func rewriteStuckAt(t *testing.T, repoPath, stuckAt string) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(string(data), "\n")
-	lines[0] = "stuck_at = \"" + stuckAt + "\""
+	lines[1] = "reason = \"" + reason + "\""
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +85,7 @@ func TestAgentAllowlistFiltering(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
 
 	// Default allowlist: rebase_conflict excluded, hook_failed included.
-	writeStuckFile(t, repo, "rebase_conflict")
+	writeStuckState(t, stateDir, repo, "rebase_conflict")
 	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
 	if res.Ran {
 		t.Fatal("agent should not run for rebase_conflict under the default allowlist")
@@ -82,24 +94,63 @@ func TestAgentAllowlistFiltering(t *testing.T) {
 		t.Error("agent command should not have executed")
 	}
 
-	writeStuckFile(t, repo, "hook_failed")
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
 	if !res.Ran || !res.Recovered {
 		t.Fatalf("expected run+recovery for hook_failed, got ran=%v recovered=%v err=%v", res.Ran, res.Recovered, res.Err)
 	}
 
+	// A forged reason in the file doesn't matter: the allowlist applies to the
+	// reason the daemon observed (rebase_conflict in the record), so a file
+	// claiming hook_failed can't smuggle a rebase_conflict episode past it.
+	writeStuckState(t, stateDir, repo, "rebase_conflict")
+	rewriteStuckReason(t, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run when the daemon-observed reason is not allowed, regardless of the file's reason")
+	}
+
+	// A forged stuck file with no matching daemon-issued record never runs
+	// the agent, whatever reason it claims.
+	writeForgedStuckFile(t, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run for a forged stuck file with no daemon-issued record")
+	}
+
 	// Explicit allowlist: only push_rejected.
-	writeStuckFile(t, repo, "hook_failed")
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), []string{"push_rejected"}, 2, "10s"), stateDir, nil)
 	if res.Ran {
 		t.Fatal("agent should not run when reason is not in the explicit allowlist")
 	}
 
 	// Agent not configured: nothing runs.
-	writeStuckFile(t, repo, "hook_failed")
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	res = RunStuckAgent(context.Background(), repo, &config.Config{Mode: "read-only", SyncBranch: "main"}, stateDir, nil)
 	if res.Ran {
 		t.Fatal("agent should not run without on_stuck_cmd")
+	}
+}
+
+func TestOversizedStuckFileIsIgnored(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	// A repo-controlled stuck file larger than the read cap must be treated as
+	// unreadable, not slurped into memory whole.
+	big := make([]byte, 2<<20)
+	for i := range big {
+		big[i] = 'a'
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), big, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run off an oversized stuck file")
 	}
 }
 
@@ -108,7 +159,7 @@ func TestAgentExitZeroRecovers(t *testing.T) {
 	stateDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "marker")
 
-	writeStuckFile(t, repo, "hook_failed")
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
 	if !res.Recovered {
 		t.Fatalf("expected recovery, got ran=%v recovered=%v err=%v", res.Ran, res.Recovered, res.Err)
@@ -118,6 +169,9 @@ func TestAgentExitZeroRecovers(t *testing.T) {
 	}
 	if _, err := os.Stat(AgentStatePath(stateDir, repo)); !os.IsNotExist(err) {
 		t.Error("attempt record should be removed on recovery")
+	}
+	if _, err := os.Stat(StuckRecordPath(stateDir, repo)); !os.IsNotExist(err) {
+		t.Error("provenance record should be removed on recovery")
 	}
 
 	// Recovery means the next sync proceeds instead of skipping on the flag.
@@ -132,7 +186,7 @@ func TestAgentAttemptCap(t *testing.T) {
 	stateDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "marker")
 
-	writeStuckFile(t, repo, "hook_failed")
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	cfg := agentTestConfig(markerCmd(marker, 1), nil, 2, "10s")
 
 	for i := 1; i <= 2; i++ {
@@ -160,9 +214,8 @@ func TestAgentAttemptCap(t *testing.T) {
 		t.Errorf("command ran %d times, want 2", runs)
 	}
 
-	// A new episode (different stuck_at) resets the counter.
-	writeStuckFile(t, repo, "hook_failed")
-	rewriteStuckAt(t, repo, "2027-01-01T00:00:00Z")
+	// A new episode (a fresh daemon-issued record) resets the counter.
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	res = RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
 	if !res.Ran || res.Attempts != 1 {
 		t.Fatalf("new episode should reset attempts, got ran=%v attempts=%d", res.Ran, res.Attempts)
@@ -173,7 +226,7 @@ func TestAgentTimeout(t *testing.T) {
 	repo := t.TempDir()
 	stateDir := t.TempDir()
 
-	writeStuckFile(t, repo, "hook_failed")
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	cfg := agentTestConfig("sleep 30", nil, 2, "100ms")
 
 	start := time.Now()
@@ -208,9 +261,9 @@ func TestAgentDoesNotHoldSyncLock(t *testing.T) {
 	testGitOK(t, repo, "add", ".gittend")
 	testGitOK(t, repo, "commit", "-m", "initial config")
 
-	writeStuckFile(t, repo, "hook_failed")
-	cfg := agentTestConfig("sleep 2; exit 1", nil, 2, "10s")
 	stateDir := t.TempDir()
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig("sleep 2; exit 1", nil, 2, "10s")
 
 	done := make(chan AgentRunResult, 1)
 	go func() {
@@ -240,7 +293,7 @@ func TestAgentContextOnStdin(t *testing.T) {
 	stateDir := t.TempDir()
 	stdinFile := filepath.Join(t.TempDir(), "stdin")
 
-	writeStuckFile(t, repo, "hook_failed")
+	writeStuckState(t, stateDir, repo, "hook_failed")
 	cfg := agentTestConfig("cat > "+stdinFile, nil, 2, "10s")
 
 	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)

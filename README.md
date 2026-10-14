@@ -487,6 +487,7 @@ on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below 
 ### Semantics
 
 - When the daemon marks a repo stuck and the reason is in `allowed_reasons`, it runs `on_stuck_cmd` (via `sh -c`, with the repo as working directory) with a context document on stdin: the stuck file contents (reason, failing command, exit code, output) plus the repo path and sync branch.
+- **Provenance:** the `.gittend.stuck` file in the repo is untrusted input — anything that can write to the repo can forge one. Whenever the daemon writes the flag, it also writes a matching record to its own state dir (the `stuck_at` timestamp and the reason it observed). The agent only runs when the file's `stuck_at` matches a daemon-issued record, and the allowlist is applied to the daemon-observed reason — not the reason in the file. A forged flag file never triggers the agent, and a forged reason can't bypass the allowlist.
 - **Exit 0** → the daemon removes the `.gittend.stuck` flag and logs the recovery; the next tick syncs normally.
 - **Non-zero exit or timeout** → the stuck flag stays and the attempt counter increments. The agent is retried on a later tick until `max_attempts` is reached for that stuck episode.
 - Once `max_attempts` is reached, the repo is permanently stuck until a human runs `git-tend unstick` (which resets the counter). This bounds the agent's budget per episode and prevents an unstick→stuck→unstick loop every tick.
@@ -499,6 +500,7 @@ on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below 
 - `rebase_conflict` is excluded from the default allowlist on purpose: auto-resolving merges in a memory/config repo is a different risk class than rerunning a hook. You can opt in explicitly with `allowed_reasons = ["hook_failed", "push_rejected", "rebase_conflict", "other"]`, but think first.
 - The agent run can take up to `timeout` (default 10m); the daemon tick waits for it, so other repos in that tick are delayed. During the run, syncs still skip the repo because the stuck flag is present — the agent cannot race the sync loop.
 - The stuck file is excluded from staging (`:!.gittend.stuck`); the agent cannot commit the flag, and the daemon removes it itself on a successful recovery.
+- Treat the context document on stdin as untrusted input. The failing command's output comes from the repo itself, so prompt injection through it is possible; provenance only bounds *whether* the agent runs, not what it reads once it does. Write `on_stuck_cmd` so the context informs the fix rather than instructing the agent.
 
 ---
 

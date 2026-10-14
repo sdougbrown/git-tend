@@ -28,10 +28,21 @@ type stuckFile struct {
 	LastOutput   string `toml:"last_output"`
 }
 
+// stuckRecord is the daemon-issued provenance record for a stuck episode.
+// writeStuck writes one to the state dir whenever it writes the repo-local
+// .gittend.stuck file. The repo-local file is untrusted — anyone with write
+// access to the repo can forge one — so RunStuckAgent refuses to act unless
+// the file's stuck_at matches a daemon-issued record, and the record's
+// daemon-observed reason is authoritative for the allowlist.
+type stuckRecord struct {
+	StuckAt   string `json:"stuck_at"`
+	Reason    string `json:"reason"`
+	WrittenAt string `json:"written_at"`
+}
+
 // agentAttempt is the per-repo attempt counter for the current stuck episode,
 // persisted in the state dir so it survives daemon restarts. Episode is the
-// stuck_at timestamp of the .gittend.stuck file the counter applies to; a new
-// stuck file means a new episode and resets the count.
+// stuck_at of the daemon-issued stuck record the counter applies to.
 type agentAttempt struct {
 	Episode      string `json:"episode"`
 	Attempts     int    `json:"attempts"`
@@ -61,6 +72,14 @@ func AgentStatePath(stateDir, repoPath string) string {
 	return filepath.Join(stateDir, "agent", hex.EncodeToString(hash[:])+".json")
 }
 
+// StuckRecordPath returns the state-dir file holding the daemon-issued
+// provenance record for a repo's stuck episode. Exported so `git-tend unstick`
+// can clear it alongside the stuck flag.
+func StuckRecordPath(stateDir, repoPath string) string {
+	hash := sha256.Sum256([]byte(repoPath))
+	return filepath.Join(stateDir, "stuck", hex.EncodeToString(hash[:])+".json")
+}
+
 // RunStuckAgent runs the repo's configured on_stuck_cmd against a stuck repo.
 //
 // The agent run happens outside sync()'s per-repo flock. Every sync acquisition
@@ -86,9 +105,21 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return res
 	}
 
-	if !agent.AllowsReason(stuck.Reason) {
+	// Provenance: the repo-local file can be forged by anything that can write
+	// to the repo. Only act when the file's stuck_at matches a record the
+	// daemon itself wrote, and treat the daemon-observed reason — not the
+	// file's — as authoritative for the allowlist.
+	rec, err := readStuckRecord(StuckRecordPath(stateDir, repoPath))
+	if err != nil || rec.StuckAt != stuck.StuckAt {
 		if logger != nil {
-			logger.Debug("agent unstick: reason not allowed", "repo", repoPath, "reason", stuck.Reason)
+			logger.Debug("agent unstick: no matching daemon-issued stuck record", "repo", repoPath)
+		}
+		return res
+	}
+
+	if !agent.AllowsReason(rec.Reason) {
+		if logger != nil {
+			logger.Debug("agent unstick: reason not allowed", "repo", repoPath, "reason", rec.Reason)
 		}
 		return res
 	}
@@ -131,13 +162,14 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	res.Attempts = record.Attempts
 
 	if runErr == nil {
-		// Recovery: clear the flag and the counter so the next tick syncs
-		// normally, and a future episode starts from zero.
+		// Recovery: clear the flag and the provenance record so the next tick
+		// syncs normally, and a future episode starts from zero.
 		if err := os.Remove(filepath.Join(repoPath, ".gittend.stuck")); err != nil && !os.IsNotExist(err) {
 			res.Err = fmt.Errorf("exit 0 but removing stuck flag: %w", err)
 			_ = writeAgentAttempt(recordPath, record)
 			return res
 		}
+		_ = os.Remove(StuckRecordPath(stateDir, repoPath))
 		_ = os.Remove(recordPath)
 		res.Recovered = true
 		if logger != nil {
@@ -158,8 +190,17 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	return res
 }
 
+// maxStuckFileBytes caps how much of the repo-controlled stuck file is read.
+const maxStuckFileBytes = 1 << 20
+
 func readStuckFile(repoPath string) (*stuckFile, error) {
-	data, err := os.ReadFile(filepath.Join(repoPath, ".gittend.stuck"))
+	f, err := os.Open(filepath.Join(repoPath, ".gittend.stuck"))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// The stuck file is repo-controlled input; never read it unbounded.
+	data, err := io.ReadAll(io.LimitReader(f, maxStuckFileBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +209,35 @@ func readStuckFile(repoPath string) (*stuckFile, error) {
 		return nil, fmt.Errorf("parsing stuck file: %w", err)
 	}
 	return &s, nil
+}
+
+func readStuckRecord(path string) (*stuckRecord, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rec stuckRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("parsing stuck record: %w", err)
+	}
+	return &rec, nil
+}
+
+func writeStuckRecord(stateDir, repoPath, stuckAt, reason string) error {
+	path := StuckRecordPath(stateDir, repoPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	rec := stuckRecord{
+		StuckAt:   stuckAt,
+		Reason:    reason,
+		WrittenAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
 }
 
 // writeAgentContext writes the structured context document the agent command
