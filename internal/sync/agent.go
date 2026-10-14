@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+	"golang.org/x/sys/unix"
 
 	"github.com/sdougbrown/git-tend/internal/config"
 )
@@ -90,8 +91,10 @@ func StuckRecordPath(stateDir, repoPath string) string {
 // is non-blocking and, while the stuck flag exists, sync exits early anyway —
 // the flag is what actually serializes the agent against syncs, so holding the
 // lock for minutes of agent time would only delay concurrent `git-tend run`
-// and manual syncs for no protection. Concurrent agent runs can't happen: the
-// daemon's tick loop is the only caller and it is single-threaded.
+// and manual syncs for no protection. Concurrent agent runs are excluded by a
+// dedicated per-repo flock (see acquireAgentLock), which also covers the
+// daemon-restart case: a replacement daemon can't start a second run while
+// the orphaned first run is still going.
 func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, stateDir string, logger *slog.Logger) AgentRunResult {
 	agent := cfg.Agent
 	var res AgentRunResult
@@ -133,6 +136,23 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	res.MaxAttempts = agent.MaxAttempts
 
 	recordPath := AgentStatePath(stateDir, repoPath)
+
+	// Serialize agent runs per repo. A flock (not a PID/timestamp marker) so
+	// the kernel releases it the moment the holding process dies: a crashed
+	// daemon can't wedge the feature and no stale-marker liveness heuristics
+	// are needed. It doesn't kill a run orphaned by a daemon restart — it
+	// only stops the replacement daemon from starting a second concurrent
+	// run on the same repo.
+	lock, err := acquireAgentLock(stateDir, repoPath)
+	if err != nil {
+		if logger != nil {
+			logger.Debug("agent unstick: another agent run is in flight", "repo", repoPath)
+		}
+		res.Attempts = readAgentAttempt(recordPath).Attempts
+		return res
+	}
+	defer lock.Close()
+
 	record := readAgentAttempt(recordPath)
 	if record.Episode != stuck.StuckAt {
 		// New stuck file: new episode, counter starts fresh.
@@ -231,6 +251,27 @@ func readStuckFile(repoPath string) (*stuckFile, error) {
 		return nil, fmt.Errorf("parsing stuck file: %w", err)
 	}
 	return &s, nil
+}
+
+// AgentLockPath returns the state-dir file used as the agent-run lock for a repo.
+func AgentLockPath(stateDir, repoPath string) string {
+	hash := sha256.Sum256([]byte(repoPath))
+	return filepath.Join(stateDir, "agent", hex.EncodeToString(hash[:])+".lock")
+}
+
+func acquireAgentLock(stateDir, repoPath string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Join(stateDir, "agent"), 0755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 func readStuckRecord(path string) (*stuckRecord, error) {

@@ -299,6 +299,44 @@ func TestAgentTimeoutKillsProcessGroup(t *testing.T) {
 	}
 }
 
+// A second RunStuckAgent must not start while one is already in flight for
+// the same repo — otherwise a daemon restart could run two agents
+// concurrently on the same working tree.
+func TestAgentRunLockSerializes(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig("sleep 1; exit 1", nil, 5, "10s")
+
+	done := make(chan AgentRunResult, 1)
+	go func() {
+		done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	cfgB := agentTestConfig(markerCmd(marker, 0), nil, 5, "10s")
+	res := RunStuckAgent(context.Background(), repo, cfgB, stateDir, nil)
+	if res.Ran {
+		t.Error("second agent run should not start while the first holds the lock")
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("second agent command should not have executed")
+	}
+
+	first := <-done
+	if !first.Ran {
+		t.Fatal("expected the first agent run to proceed")
+	}
+
+	// Once the lock is released, the next run goes through.
+	res = RunStuckAgent(context.Background(), repo, cfgB, stateDir, nil)
+	if !res.Ran || !res.Recovered {
+		t.Fatalf("expected run+recovery after lock release, got ran=%v recovered=%v err=%v", res.Ran, res.Recovered, res.Err)
+	}
+}
+
 // The agent run must not hold the per-repo flock: while it runs, another sync
 // must be able to acquire the lock. The sync still skips on the stuck flag,
 // but only after taking the lock — "locked" would mean the agent held it.
