@@ -314,7 +314,10 @@ func TestGenerateWithModelInlinePromptCommand(t *testing.T) {
 	diff := "M\tsrc/a.go\nM\tlib/b.go\nM\tcmd/c.go\nM\tpkg/d.go\nM\tinternal/e.go\nM\ttest/f.go\nM\tdocs/g.go"
 	modelStdin := "diff --git a/src/a.go b/src/a.go"
 
-	modelCmd := "sed -n '1s/.*/inline prompt saw the full diff/p'"
+	// The command captures all of stdin and reports whether the default prompt
+	// appears anywhere in it (regression) or whether the diff content reached
+	// stdin (expected pass-through).
+	modelCmd := "input=$(cat); if printf '%s\\n' \"$input\" | grep -q 'name-status listing'; then echo 'default prompt appended'; elif printf '%s\\n' \"$input\" | grep -q 'diff --git a/src/a.go b/src/a.go'; then echo 'inline prompt saw the full diff'; else echo 'stdin missing diff'; fi"
 	result := GenerateWithModel(diff, "🐌", 3, modelCmd, 30*time.Second, modelStdin)
 
 	if result != "🐌 inline prompt saw the full diff" {
