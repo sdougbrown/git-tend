@@ -48,6 +48,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if state == "" {
 			state = "ok"
 		}
+		if state == "stuck" && rs.AgentMaxAttempts > 0 {
+			if rs.AgentAttempts >= rs.AgentMaxAttempts {
+				state = fmt.Sprintf("stuck (agent exhausted, attempts %d/%d)", rs.AgentAttempts, rs.AgentMaxAttempts)
+			} else {
+				state = fmt.Sprintf("stuck (agent pending, attempts %d/%d)", rs.AgentAttempts, rs.AgentMaxAttempts)
+			}
+		}
 
 		lastSync := "never"
 		if rs.LastSyncAt != "" {

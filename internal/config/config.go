@@ -22,6 +22,7 @@ type Config struct {
 	Include    IncludeConfig `toml:"include"`
 	Exclude    ExcludeConfig `toml:"exclude"`
 	Notify     NotifyConfig  `toml:"notify"`
+	Agent      AgentConfig   `toml:"agent"`
 }
 
 type CommitConfig struct {
@@ -57,6 +58,35 @@ type NotifyConfig struct {
 type RepoEntry struct {
 	Path string         `toml:"path"`
 	Raw  map[string]any `toml:"-"`
+}
+
+// Stuck reasons written to .gittend.stuck by the sync loop. rebase_conflict is
+// excluded from the default agent allowlist because auto-resolving merges in a
+// memory/config repo is a different risk class than rerunning a hook.
+var StuckReasons = []string{"hook_failed", "push_rejected", "rebase_conflict", "other"}
+
+type AgentConfig struct {
+	OnStuckCmd     string   `toml:"on_stuck_cmd"`
+	AllowedReasons []string `toml:"allowed_reasons"`
+	MaxAttempts    int      `toml:"max_attempts"`
+	Timeout        string   `toml:"timeout"`
+}
+
+// Enabled reports whether agent-assisted unstick is configured.
+func (a AgentConfig) Enabled() bool { return a.OnStuckCmd != "" }
+
+// AllowsReason reports whether reason may trigger the agent, given an explicit
+// allowlist (empty/nil means the default: everything except rebase_conflict).
+func (a AgentConfig) AllowsReason(reason string) bool {
+	if len(a.AllowedReasons) == 0 {
+		return reason != "rebase_conflict"
+	}
+	for _, r := range a.AllowedReasons {
+		if r == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func ParseDuration(s string) (time.Duration, error) {
@@ -493,6 +523,32 @@ func finalizeConfig(cfg *Config) error {
 	// behave exactly like the deterministic strategy.
 	if (cfg.Commit.Strategy == "model" || cfg.Commit.Strategy == "agent") && cfg.Commit.ModelCmd == "" {
 		cfg.Commit.Strategy = "deterministic"
+	}
+
+	if cfg.Agent.Timeout != "" {
+		if _, err := time.ParseDuration(cfg.Agent.Timeout); err != nil {
+			return fmt.Errorf("invalid agent timeout %q: %w", cfg.Agent.Timeout, err)
+		}
+	}
+	if cfg.Agent.Timeout == "" {
+		cfg.Agent.Timeout = "10m"
+	}
+
+	if cfg.Agent.MaxAttempts < 0 {
+		return fmt.Errorf("invalid agent max_attempts %d: must be >= 1", cfg.Agent.MaxAttempts)
+	}
+	if cfg.Agent.MaxAttempts == 0 {
+		cfg.Agent.MaxAttempts = 2
+	}
+
+	validReasons := make(map[string]bool, len(StuckReasons))
+	for _, r := range StuckReasons {
+		validReasons[r] = true
+	}
+	for _, r := range cfg.Agent.AllowedReasons {
+		if !validReasons[r] {
+			return fmt.Errorf("invalid agent allowed_reason %q: must be one of %s", r, strings.Join(StuckReasons, ", "))
+		}
 	}
 
 	return nil

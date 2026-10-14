@@ -10,6 +10,7 @@ import (
 	"github.com/sdougbrown/git-tend/internal/git"
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
+	gitSync "github.com/sdougbrown/git-tend/internal/sync"
 )
 
 var unstickAll bool
@@ -77,6 +78,12 @@ func removeStuckFlag(repoPath string) error {
 			return nil
 		}
 		return fmt.Errorf("removing stuck flag: %w", err)
+	}
+
+	// Reset the agent attempt counter so a fresh stuck episode starts with a
+	// full budget of attempts.
+	if err := os.Remove(gitSync.AgentStatePath(paths.StateDir(), repoPath)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("resetting agent attempt record: %w", err)
 	}
 
 	fmt.Printf("unstuck %s\n", repoPath)

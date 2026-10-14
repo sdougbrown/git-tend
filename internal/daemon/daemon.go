@@ -247,6 +247,7 @@ func (d *Daemon) tick(ctx context.Context) {
 			if oldState != rs.CurrentState {
 				d.maybeNotify(repo.Path, oldState, rs.CurrentState, repo.Config, "stuck flag set")
 			}
+			d.maybeRunAgent(ctx, repo)
 			continue
 		}
 
@@ -288,6 +289,8 @@ func (d *Daemon) tick(ctx context.Context) {
 			rs.SnoozedUntil = ""
 			rs.OfflineSince = ""
 			rs.ConsecutiveOfflineFailures = 0
+			rs.AgentAttempts = 0
+			rs.AgentMaxAttempts = 0
 
 		case "offline":
 			off := d.offline[repo.Path]
@@ -342,6 +345,9 @@ func (d *Daemon) tick(ctx context.Context) {
 		if result.State != "skipped" && oldState != rs.CurrentState {
 			d.maybeNotify(repo.Path, oldState, rs.CurrentState, repo.Config, rs.LastError)
 		}
+		if result.State == "stuck" {
+			d.maybeRunAgent(ctx, repo)
+		}
 	}
 
 	d.writeStatus()
@@ -388,6 +394,23 @@ func (d *Daemon) readSnooze(repoPath string) time.Time {
 	}
 
 	return t
+}
+
+// maybeRunAgent invokes the repo's configured agent unstick hook, if any, and
+// records the attempt state for status display. It runs outside d.mu and can
+// take up to the agent timeout; the stuck flag keeps concurrent syncs from
+// touching the repo while it runs.
+func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
+	if repo.Config == nil || !repo.Config.Agent.Enabled() {
+		return
+	}
+	res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
+	d.mu.Lock()
+	rs := d.repoStatus[repo.Path]
+	rs.AgentAttempts = res.Attempts
+	rs.AgentMaxAttempts = res.MaxAttempts
+	d.repoStatus[repo.Path] = rs
+	d.mu.Unlock()
 }
 
 func (d *Daemon) maybeNotify(repoPath string, prior, current string, cfg *config.Config, reason string) {

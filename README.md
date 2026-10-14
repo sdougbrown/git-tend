@@ -16,7 +16,7 @@ For each opted-in repo, the daemon can operate in one of two modes:
 
 **read-write** — stages your working tree, generates a commit message from the diff, does a `git pull --rebase`, then pushes. If any step fails (commit hook, rebase conflict, push rejection), it stops and marks the repo stuck.
 
-A repo is marked stuck by writing a `.gittend.stuck` file in the repo root. While that file exists, the daemon skips the repo entirely and won't make things worse. You resolve the problem manually, then run `git-tend unstick <path>` to clear the flag.
+A repo is marked stuck by writing a `.gittend.stuck` file in the repo root. While that file exists, the daemon skips the repo entirely and won't make things worse. You resolve the problem manually, then run `git-tend unstick <path>` to clear the flag — or, if you opt in to [agent-assisted unstick](#agent-assisted-unstick), the daemon can attempt to clear mechanically recoverable failures itself.
 
 The daemon also tracks an "offline" state separately from "stuck." If a fetch or push fails with a network error, the repo backs off exponentially (capping at `offline_backoff_cap`, default 30 minutes) rather than hammering the remote.
 
@@ -103,7 +103,7 @@ REPO                                     MODE STATE    LAST SYNC    AHEAD      B
 /Users/you/.dotfiles                     ro   ok       12s ago      0          0
 ```
 
-State is `pending`, `ok`, `stuck`, `offline`, or `snoozed`. `pending` means the daemon has discovered the repo but hasn't synced it yet (you'll see this briefly after `git-tend install`, `restart`, or `reload`). Mode is `ro` (read-only) or `rw` (read-write).
+State is `pending`, `ok`, `stuck`, `offline`, or `snoozed`. A stuck repo with the agent feature enabled shows the attempt budget, e.g. `stuck (agent pending, attempts 1/2)` while attempts remain or `stuck (agent exhausted, attempts 2/2)` once the cap is reached and a human must intervene. `pending` means the daemon has discovered the repo but hasn't synced it yet (you'll see this briefly after `git-tend install`, `restart`, or `reload`). Mode is `ro` (read-only) or `rw` (read-write).
 
 **Step 3: If a repo goes stuck, see why.**
 
@@ -313,6 +313,25 @@ paths = ["secrets/", "*.log"]
 # a repo transitions to stuck or recovers.
 on_stuck = false
 on_recovered = false
+
+[agent]
+# Optional: shell command that attempts to diagnose and clear a stuck repo
+# automatically. See "Agent-assisted unstick" below for semantics and safety
+# notes. Leave unset (default) to keep unstick manual-only.
+on_stuck_cmd = ""
+
+# Stuck reasons that may trigger the agent. Default: everything except
+# rebase_conflict (auto-resolving merges is a different risk class than
+# rerunning a hook). Valid values: hook_failed, push_rejected,
+# rebase_conflict, other.
+allowed_reasons = ["hook_failed", "push_rejected", "other"]
+
+# Maximum agent runs per stuck episode. Once reached, the repo stays stuck
+# until a human runs 'git-tend unstick'.
+max_attempts = 2
+
+# Hard kill for the agent run.
+timeout = "10m"
 ```
 
 ### Central per-repo config (`[[repo]]` in the user config)
@@ -456,13 +475,40 @@ model_timeout = "2m"
 
 ---
 
+## Agent-assisted unstick
+
+By default a stuck repo stays stuck until a human runs `git-tend unstick`. Repos can opt in to letting an agent run try to diagnose and clear the condition automatically for failure classes that are mechanically recoverable (a transient hook failure, a push rejected because the remote moved).
+
+```toml
+[agent]
+on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below from stdin, diagnose the failure, fix it in place (e.g. rerun the failed git command), and exit 0 only if the repo can sync again. Do not force-push, rewrite history, or delete untracked work.'"
+```
+
+### Semantics
+
+- When the daemon marks a repo stuck and the reason is in `allowed_reasons`, it runs `on_stuck_cmd` (via `sh -c`, with the repo as working directory) with a context document on stdin: the stuck file contents (reason, failing command, exit code, output) plus the repo path and sync branch.
+- **Exit 0** → the daemon removes the `.gittend.stuck` flag and logs the recovery; the next tick syncs normally.
+- **Non-zero exit or timeout** → the stuck flag stays and the attempt counter increments. The agent is retried on a later tick until `max_attempts` is reached for that stuck episode.
+- Once `max_attempts` is reached, the repo is permanently stuck until a human runs `git-tend unstick` (which resets the counter). This bounds the agent's budget per episode and prevents an unstick→stuck→unstick loop every tick.
+- The agent run is not counted per sync attempt forever: a fresh stuck episode (a new `.gittend.stuck` written after a successful sync) starts with a full budget again.
+- `status` shows the state: `stuck (agent pending, attempts 1/2)` or `stuck (agent exhausted, attempts 2/2)`.
+
+### Safety notes
+
+- **The command runs with the daemon's full user privileges** (launchd/systemd context). It can read and write anything your user can. Only point it at repos — and commands — you trust.
+- `rebase_conflict` is excluded from the default allowlist on purpose: auto-resolving merges in a memory/config repo is a different risk class than rerunning a hook. You can opt in explicitly with `allowed_reasons = ["hook_failed", "push_rejected", "rebase_conflict", "other"]`, but think first.
+- The agent run can take up to `timeout` (default 10m); the daemon tick waits for it, so other repos in that tick are delayed. During the run, syncs still skip the repo because the stuck flag is present — the agent cannot race the sync loop.
+- The stuck file is excluded from staging (`:!.gittend.stuck`); the agent cannot commit the flag, and the daemon removes it itself on a successful recovery.
+
+---
+
 ## Commands
 
 | Command | Description |
 |---|---|
 | `git-tend status` | Show last-sync status for all managed repos |
 | `git-tend run <path>` | Run one sync cycle for a single repo manually |
-| `git-tend unstick <path>` | Remove the `.gittend.stuck` flag and re-enable the repo |
+| `git-tend unstick <path>` | Remove the `.gittend.stuck` flag (and reset the agent attempt counter) and re-enable the repo |
 | `git-tend snooze <path> [duration]` | Suppress stuck surfacing for a repo; default duration is 24h |
 | `git-tend reload` | Send SIGHUP to the running daemon to reload config and rescan roots |
 | `git-tend restart` | Stop the daemon so the service manager respawns it (picks up a rebuilt binary) |

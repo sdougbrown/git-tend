@@ -454,3 +454,70 @@ func TestResolveUserArrayReplacesGittend(t *testing.T) {
 		t.Errorf("Include.Paths = %v, want [a b] (kept from .gittend)", cfg.Include.Paths)
 	}
 }
+
+func TestParseAgentConfig(t *testing.T) {
+	t.Run("defaults when agent disabled", func(t *testing.T) {
+		cfg, err := Resolve(writeConfig(t, "mode = \"read-only\"\n"), nil, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.Enabled() {
+			t.Error("agent should be disabled without on_stuck_cmd")
+		}
+		if cfg.Agent.MaxAttempts != 2 {
+			t.Errorf("MaxAttempts = %d, want default 2", cfg.Agent.MaxAttempts)
+		}
+		if cfg.Agent.Timeout != "10m" {
+			t.Errorf("Timeout = %q, want default 10m", cfg.Agent.Timeout)
+		}
+		if !cfg.Agent.AllowsReason("hook_failed") {
+			t.Error("default allowlist should include hook_failed")
+		}
+		if cfg.Agent.AllowsReason("rebase_conflict") {
+			t.Error("default allowlist should exclude rebase_conflict")
+		}
+	})
+
+	t.Run("invalid timeout", func(t *testing.T) {
+		_, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\ntimeout = \"bogus\"\n"), nil, "/tmp/repo")
+		if err == nil || !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("expected timeout error, got: %v", err)
+		}
+	})
+
+	t.Run("negative max_attempts", func(t *testing.T) {
+		_, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\nmax_attempts = -1\n"), nil, "/tmp/repo")
+		if err == nil || !strings.Contains(err.Error(), "max_attempts") {
+			t.Fatalf("expected max_attempts error, got: %v", err)
+		}
+	})
+
+	t.Run("explicit max_attempts kept", func(t *testing.T) {
+		cfg, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\nmax_attempts = 3\n"), nil, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.MaxAttempts != 3 {
+			t.Errorf("MaxAttempts = %d, want 3", cfg.Agent.MaxAttempts)
+		}
+	})
+
+	t.Run("unknown allowed_reason", func(t *testing.T) {
+		_, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\nallowed_reasons = [\"bogus\"]\n"), nil, "/tmp/repo")
+		if err == nil || !strings.Contains(err.Error(), "allowed_reason") {
+			t.Fatalf("expected allowed_reason error, got: %v", err)
+		}
+	})
+
+	t.Run("explicit allowlist respected", func(t *testing.T) {
+		cfg, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\nallowed_reasons = [\"rebase_conflict\"]\n"), nil, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.Agent.AllowsReason("rebase_conflict") {
+			t.Error("explicit allowlist should permit rebase_conflict")
+		}
+		if cfg.Agent.AllowsReason("hook_failed") {
+			t.Error("explicit allowlist should exclude hook_failed")
+		}	})
+}
