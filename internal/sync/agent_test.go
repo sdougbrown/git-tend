@@ -52,6 +52,23 @@ func rewriteStuckReason(t *testing.T, repoPath, reason string) {
 	}
 }
 
+// rewriteStuckAt rewrites the stuck_at in the repo-local flag, leaving the
+// daemon-issued record untouched — a flag whose nonce no longer matches any
+// daemon-issued record.
+func rewriteStuckAt(t *testing.T, repoPath, stuckAt string) {
+	t.Helper()
+	path := filepath.Join(repoPath, ".gittend.stuck")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	lines[0] = "stuck_at = \"" + stuckAt + "\""
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func agentTestConfig(cmd string, allowedReasons []string, maxAttempts int, timeout string) *config.Config {
 	return &config.Config{
 		Mode:       "read-only",
@@ -206,6 +223,21 @@ func TestOversizedStuckFileIsIgnored(t *testing.T) {
 	if res.Ran {
 		t.Fatal("agent should not run off an oversized stuck file")
 	}
+
+	// Same cap for a file that would parse if a truncated prefix were read:
+	// a valid stuck_at plus padding past the cap must still be refused.
+	padded := `stuck_at = "2026-01-01T00:00:00Z"
+reason = "hook_failed"
+last_output = """
+` + strings.Repeat("a", 2<<20) + `"""
+`
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), []byte(padded), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run off an oversized but parseable stuck file")
+	}
 }
 
 func TestAgentExitZeroRecovers(t *testing.T) {
@@ -265,7 +297,8 @@ func TestAgentExitZeroRecovers(t *testing.T) {
 	}
 }
 
-func TestAgentAttemptCap(t *testing.T) {	repo := t.TempDir()
+func TestAgentAttemptCap(t *testing.T) {
+	repo := t.TempDir()
 	stateDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "marker")
 
@@ -386,9 +419,10 @@ func TestAgentTimeoutKillsProcessGroup(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
 
 	writeStuckState(t, stateDir, repo, "hook_failed")
-	// The shell outlives the sleep, so the sleep (and the marker write) is a
-	// grandchild. A timeout that kills only the sh wrapper leaves the
-	// grandchild running; a process-group kill must not.
+	// The command runs under `sh -c`, so the sleep (and the marker write) is
+	// a direct child of the shell, not of the daemon. A timeout that kills
+	// only the sh wrapper would leave that child running; a process-group
+	// kill must not.
 	cfg := agentTestConfig("sleep 1; echo ran >> "+marker, nil, 2, "100ms")
 
 	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
@@ -402,7 +436,7 @@ func TestAgentTimeoutKillsProcessGroup(t *testing.T) {
 	// Give any surviving orphan ample time to write the marker.
 	time.Sleep(1500 * time.Millisecond)
 	if markerRuns(t, marker) != 0 {
-		t.Error("grandchild survived the timeout; process group was not killed")
+		t.Error("shell's child survived the timeout; process group was not killed")
 	}
 }
 
@@ -513,5 +547,110 @@ func TestAgentContextOnStdin(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("stdin context missing %q, got:\n%s", want, s)
 		}
+	}
+}
+
+// An exit-0 recovery persists the incremented attempt counter, so a new
+// stuck episode right after continues the same budget: attempt 2 of 2 runs,
+// then the cap is exhausted. Without the persisted increment the agent would
+// re-arm a full budget on every episode.
+func TestAgentBudgetCarriesOverAfterExitZeroRecovery(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	cfg := agentTestConfig(markerCmd(marker, 0), nil, 2, "10s")
+
+	// Episode 1: the agent "recovers" (exit 0) without fixing anything.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran || !res.Recovered || res.Attempts != 1 {
+		t.Fatalf("episode 1: got ran=%v recovered=%v attempts=%d, want run+recovery at attempt 1", res.Ran, res.Recovered, res.Attempts)
+	}
+
+	// Episode 2: a fresh flag + record; the budget must carry over, so this
+	// is attempt 2 of 2 (and it exits 0, so it "recovers" again).
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran || !res.Recovered || res.Attempts != 2 {
+		t.Fatalf("episode 2: got ran=%v recovered=%v attempts=%d, want run at attempt 2 of 2", res.Ran, res.Recovered, res.Attempts)
+	}
+
+	// Budget exhausted: no further runs, whatever the episode.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if res.Ran {
+		t.Fatal("episode 3: agent should not run once the carried-over budget is spent")
+	}
+	if runs := markerRuns(t, marker); runs != 2 {
+		t.Errorf("command ran %d times, want 2", runs)
+	}
+}
+
+// A flag whose stuck_at doesn't match the daemon-issued record must not run
+// the agent, even though a record exists — the provenance match is per
+// episode, not just record-presence.
+func TestStuckRecordMismatchDoesNotRun(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	rewriteStuckAt(t, repo, "2000-01-01T00:00:00Z")
+
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent must not run when the flag's stuck_at mismatches the record")
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("agent command should not have executed")
+	}
+}
+
+// writeStuck refuses to create the stuck flag through a symlink: the path is
+// repo-controlled, and following it would write repo-influenced content to an
+// arbitrary target.
+func TestWriteStuckRefusesSymlinkedFlag(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err == nil {
+		t.Fatal("writeStuck must refuse a symlinked stuck path")
+	}
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "keep" {
+		t.Errorf("wrote through the symlink: victim now holds %q", data)
+	}
+}
+
+// writeStuck takes the agent lock, so a write racing an in-flight agent run
+// fails instead of interleaving with that run's record/flag cleanup.
+func TestWriteStuckRefusesWhileAgentLockHeld(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err == nil {
+		t.Error("writeStuck must fail while the agent lock is held elsewhere")
+	}
+	lock.Close()
+
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err != nil {
+		t.Errorf("writeStuck should succeed once the lock is released: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Error("stuck flag should exist after a successful writeStuck")
 	}
 }
