@@ -152,12 +152,25 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		if logger != nil {
 			logger.Debug("agent unstick: another agent run is in flight", "repo", repoPath)
 		}
-		res.Attempts = readAgentAttempt(recordPath).Attempts
+		if rec, rerr := readAgentAttempt(recordPath); rerr == nil {
+			res.Attempts = rec.Attempts
+		}
 		return res
 	}
 	defer lock.Close()
 
-	record := readAgentAttempt(recordPath)
+	record, err := readAgentAttempt(recordPath)
+	if err != nil {
+		// Unparseable record: fail closed — treat the budget as spent rather
+		// than re-arming the agent from state we can't trust. A successful
+		// sync or `git-tend unstick` removes the record and unwedges the
+		// feature; a merely absent record is a fresh budget, not an error.
+		if logger != nil {
+			logger.Warn("agent unstick: unreadable attempt record, treating budget as spent", "repo", repoPath, "error", err)
+		}
+		res.Attempts = agent.MaxAttempts
+		return res
+	}
 	// The budget is per repo, not per stuck file: a new episode — even one
 	// created right after the agent's own exit 0 — does not reset the
 	// counter. Rewriting stuck_at can't help an attacker either: the
@@ -293,20 +306,12 @@ func readStuckRecord(path string) (*stuckRecord, error) {
 }
 
 func writeStuckRecord(stateDir, repoPath, stuckAt, reason string) error {
-	path := StuckRecordPath(stateDir, repoPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
 	rec := stuckRecord{
 		StuckAt:   stuckAt,
 		Reason:    reason,
 		WrittenAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	data, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
+	return writeJSONAtomic(StuckRecordPath(stateDir, repoPath), rec)
 }
 
 // writeAgentContext writes the structured context document the agent command
@@ -321,27 +326,55 @@ func writeAgentContext(w io.Writer, repoPath, syncBranch string, stuck *stuckFil
 	fmt.Fprintf(w, "last_output = \"\"\"\n%s\"\"\"\n", stuck.LastOutput)
 }
 
-func readAgentAttempt(path string) agentAttempt {
+func readAgentAttempt(path string) (agentAttempt, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return agentAttempt{}
+		if os.IsNotExist(err) {
+			// Absent record: a fresh budget, not an error.
+			return agentAttempt{}, nil
+		}
+		return agentAttempt{}, err
 	}
 	var a agentAttempt
-	if json.Unmarshal(data, &a) != nil {
-		return agentAttempt{}
+	if err := json.Unmarshal(data, &a); err != nil {
+		return agentAttempt{}, fmt.Errorf("parsing attempt record: %w", err)
 	}
-	return a
+	return a, nil
 }
 
-func writeAgentAttempt(path string, a agentAttempt) error {
+// writeJSONAtomic writes JSON state via a temp file + rename so a crash can
+// never leave a truncated record behind (a truncated record would fail closed
+// and wedge the agent until a human intervenes).
+func writeJSONAtomic(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(a, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0644); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+func writeAgentAttempt(path string, a agentAttempt) error {
+	return writeJSONAtomic(path, a)
 }
 
 func parseAgentTimeout(timeout string) time.Duration {

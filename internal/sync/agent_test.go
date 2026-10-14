@@ -133,6 +133,34 @@ func TestAgentAllowlistFiltering(t *testing.T) {
 	}
 }
 
+func TestCorruptAttemptRecordFailsClosed(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	recordPath := AgentStatePath(stateDir, repo)
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unparseable state must not re-arm the agent from an effectively-fresh
+	// counter; the budget is treated as spent until the record is cleared.
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent must not run from an unparseable attempt record")
+	}
+	if res.MaxAttempts != 2 || res.Attempts != 2 {
+		t.Errorf("got MaxAttempts=%d Attempts=%d, want budget reported as spent (2/2)", res.MaxAttempts, res.Attempts)
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("agent command should not have executed")
+	}
+}
+
 func TestAgentMaxAttemptsOnlyWhenEngaged(t *testing.T) {
 	repo := t.TempDir()
 	stateDir := t.TempDir()
