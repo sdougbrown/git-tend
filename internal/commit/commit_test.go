@@ -534,6 +534,22 @@ func TestRunAgentStripsNULBytes(t *testing.T) {
 	}
 }
 
+func TestRunAgentWaitDelayDoesNotBlockOnBackgroundedGrandchild(t *testing.T) {
+	// A backgrounded grandchild (sleep 60 &) holds the stdout pipe open after
+	// sh exits. Without cmd.WaitDelay, cmd.Wait would block for the
+	// grandchild's lifetime (~60s) while the per-repo flock is held; with it,
+	// the pipes are closed and the wait returns well within timeout+WaitDelay.
+	start := time.Now()
+	_, ok := runAgent("sleep 60 &", 100*time.Millisecond, "")
+	elapsed := time.Since(start)
+	if ok {
+		t.Fatalf("expected ok=false for a backgrounded grandchild holding the pipe")
+	}
+	if elapsed > 15*time.Second {
+		t.Errorf("runAgent took %v, expected well under timeout+WaitDelay (~5s); the backgrounded sleep must not block the wait", elapsed)
+	}
+}
+
 func TestBoundedWriterDiscardsBeyondCap(t *testing.T) {
 	w := &boundedWriter{max: 5}
 	n, err := w.Write([]byte("abcdefgh"))
