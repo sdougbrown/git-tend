@@ -889,3 +889,60 @@ func TestSyncDeterministicStrategyPromptSendsNameStatusDiff(t *testing.T) {
 		t.Errorf("expected custom prompt + name-status diff (no full patch) on model stdin, got:\n%s", log)
 	}
 }
+
+func TestSyncDeterministicStrategyNoPromptSendsFullDiff(t *testing.T) {
+	// Backward compat: under the default strategy with no model_prompt, the
+	// model's stdin must be the full patch — no prompt composed. This is the
+	// inline-prompt model_cmd scenario: a command carrying its own prompt in
+	// its argv keeps receiving the full diff.
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	for _, dir := range []string{"src", "lib", "cmd", "pkg"} {
+		if err := os.MkdirAll(filepath.Join(repo, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, dir, "f.txt"), []byte(dir), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	modelCmd := "input=$(cat); p=missing; if printf '%s\\n' \"$input\" | grep -q 'name-status listing'; then p=present; fi; f=none; if printf '%s\\n' \"$input\" | grep -q 'diff --git'; then f=full; fi; echo \"prompt=$p full=$f\""
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji:          "🐌",
+			ModelCmd:       modelCmd,
+			FallbackThresh: 3,
+		},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	log := testGit(t, clone2, "log", "--oneline")
+	if !strings.Contains(log, "prompt=missing full=full") {
+		t.Errorf("expected full diff with no composed prompt on model stdin, got:\n%s", log)
+	}
+}
