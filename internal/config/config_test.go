@@ -492,6 +492,23 @@ func TestParseAgentConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("zero max_attempts rejected", func(t *testing.T) {
+		_, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\nmax_attempts = 0\n"), nil, "/tmp/repo")
+		if err == nil || !strings.Contains(err.Error(), "max_attempts") {
+			t.Fatalf("expected max_attempts error, got: %v", err)
+		}
+	})
+
+	t.Run("omitted max_attempts defaults to 2", func(t *testing.T) {
+		cfg, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\n"), nil, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.MaxAttempts != 2 {
+			t.Errorf("MaxAttempts = %d, want default 2", cfg.Agent.MaxAttempts)
+		}
+	})
+
 	t.Run("explicit max_attempts kept", func(t *testing.T) {
 		cfg, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\nmax_attempts = 3\n"), nil, "/tmp/repo")
 		if err != nil {
@@ -519,5 +536,6 @@ func TestParseAgentConfig(t *testing.T) {
 		}
 		if cfg.Agent.AllowsReason("hook_failed") {
 			t.Error("explicit allowlist should exclude hook_failed")
-		}	})
+		}
+	})
 }

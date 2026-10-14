@@ -240,6 +240,9 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 		if err := overlayEntry(&probe, &entries[i], entries[i].Path); err != nil {
 			return nil, err
 		}
+		if !rawAgentMaxAttemptsPresent(entries[i].Raw) {
+			probe.Agent.MaxAttempts = 2
+		}
 		if err := finalizeConfig(&probe); err != nil {
 			return nil, fmt.Errorf("invalid user repo entry for %s: %w", entries[i].Path, err)
 		}
@@ -403,6 +406,7 @@ func clearUserOnlyKeys(cfg *Config, repoPath string) {
 // result. gittendPath may be empty when the repo has no .gittend file.
 func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, error) {
 	var cfg Config
+	maxAttemptsPresent := false
 
 	if gittendPath != "" {
 		data, err := os.ReadFile(gittendPath)
@@ -413,12 +417,21 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 		if err != nil {
 			return nil, err
 		}
+		var raw map[string]any
+		if err := toml.Unmarshal(data, &raw); err == nil {
+			maxAttemptsPresent = rawAgentMaxAttemptsPresent(raw)
+		}
 	}
 
 	if entry != nil {
 		if err := overlayEntry(&cfg, entry, repoPath); err != nil {
 			return nil, err
 		}
+		maxAttemptsPresent = maxAttemptsPresent || rawAgentMaxAttemptsPresent(entry.Raw)
+	}
+
+	if !maxAttemptsPresent {
+		cfg.Agent.MaxAttempts = 2
 	}
 
 	if err := finalizeConfig(&cfg); err != nil {
@@ -478,6 +491,26 @@ func parseRepoConfig(data []byte, gittendPath, repoPath string) (Config, error) 
 	return cfg, nil
 }
 
+// rawAgentMaxAttemptsPresent reports whether a raw TOML table carries an
+// [agent] max_attempts key. Key names are matched case-insensitively, the way
+// go-toml matches struct fields, so [AGENT] MAX_ATTEMPTS counts the same as
+// agent.max_attempts.
+func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
+	for k, v := range raw {
+		if !strings.EqualFold(k, "agent") {
+			continue
+		}
+		if t, ok := v.(map[string]any); ok {
+			for k2 := range t {
+				if strings.EqualFold(k2, "max_attempts") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // finalizeConfig applies built-in defaults and validation to a config.
 func finalizeConfig(cfg *Config) error {
 	if cfg.Mode == "" {
@@ -534,11 +567,8 @@ func finalizeConfig(cfg *Config) error {
 		cfg.Agent.Timeout = "10m"
 	}
 
-	if cfg.Agent.MaxAttempts < 0 {
+	if cfg.Agent.MaxAttempts <= 0 {
 		return fmt.Errorf("invalid agent max_attempts %d: must be >= 1", cfg.Agent.MaxAttempts)
-	}
-	if cfg.Agent.MaxAttempts == 0 {
-		cfg.Agent.MaxAttempts = 2
 	}
 
 	validReasons := make(map[string]bool, len(StuckReasons))
