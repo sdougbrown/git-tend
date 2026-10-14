@@ -359,9 +359,10 @@ strategies inherit that trust. The agent strategy executes `model_cmd` via
 the per-repo `.gittend` — so anyone who can write a `.gittend` file into a
 scanned repo achieves command execution on the host, with the full diff
 (which may contain secrets) exposed to that command. This is the same trust
-model as the `model` strategy, but the agent path widens the surface: it
-triggers automatically when the heuristic message is low-information and
-sends the full cached diff. Treat write access to `.gittend` like write
+model as the `model` strategy, but the agent path widens the surface by
+sending the full cached diff (which may contain secrets) plus the repo path
+and branch, rather than the name-status diff the `model` strategy sends.
+Treat write access to `.gittend` like write
 access to the daemon's privileges, and consider who can write it in the
 repos you opt in (collaborators, cloned repos).
 
