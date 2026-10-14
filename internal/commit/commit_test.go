@@ -445,6 +445,22 @@ func TestGenerateAgentCustomPromptOverridesDefault(t *testing.T) {
 	}
 }
 
+func TestGenerateAgentTruncatesOversizedDiff(t *testing.T) {
+	// A diff well over MaxAgentDiffBytes must reach the agent capped at a
+	// line boundary with the truncation note, so the agent knows the tail
+	// is missing.
+	fullDiff := "diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n" +
+		strings.Repeat("line of change content\n", 1000) // ~22.5 KiB > 16 KiB
+	// Read all of stdin once, then check both the prompt and the
+	// truncation note against it; echo how many of the two were seen.
+	agentCmd := `input=$(cat); n=0; echo "$input" | grep -q 'prompt text here' && n=$((n+1)); echo "$input" | grep -q '\[git-tend: diff truncated' && n=$((n+1)); echo "saw $n of 2"`
+	result := GenerateAgent(agentLowInfoDiff(), fullDiff, "/repo", "main", "prompt text here", "🐌", 1, agentCmd, 30*time.Second)
+
+	if result != "🐌 saw 2 of 2" {
+		t.Errorf("expected both the prompt and the truncation note on the agent's stdin, got %q", result)
+	}
+}
+
 func TestTruncateDiff(t *testing.T) {
 	tests := []struct {
 		name string
