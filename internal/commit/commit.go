@@ -34,6 +34,12 @@ const maxAgentMessageRunes = 2000
 // message cap while a runaway agent command cannot grow the daemon's memory.
 const maxAgentStdoutBytes = maxAgentMessageRunes * 4
 
+// maxModelStdoutBytes bounds model-command stdout the same way. The message
+// is truncated to 72 runes (at most 288 bytes of UTF-8); the margin covers
+// verbose one-liners without letting a runaway command grow the daemon's
+// memory.
+const maxModelStdoutBytes = 4096
+
 // DefaultAgentPrompt is the built-in prompt used when a repo opts into the
 // agent strategy without configuring its own model_prompt. It names the
 // stdin content explicitly: models that aren't told what stdin holds often
@@ -308,12 +314,14 @@ func runModel(modelCmd string, modelTimeout time.Duration, modelStdin string) (s
 	cmd := exec.CommandContext(ctx, "sh", "-c", modelCmd)
 	cmd.Stdin = strings.NewReader(modelStdin)
 	cmd.WaitDelay = 5 * time.Second
-	out, err := cmd.Output()
-	if err != nil {
+	var bw boundedWriter
+	bw.max = maxModelStdoutBytes
+	cmd.Stdout = &bw
+	if err := cmd.Run(); err != nil {
 		return "", false
 	}
 
-	result := strings.TrimSpace(string(out))
+	result := strings.TrimSpace(bw.buf)
 	if result == "" {
 		return "", false
 	}

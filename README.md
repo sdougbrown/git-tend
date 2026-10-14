@@ -258,14 +258,6 @@ strategy = "deterministic"
 # Under the agent strategy the agent never runs git itself; it only prints
 # text that git-tend validates and commits. See the trust-model section.
 #
-# What the command receives on stdin depends on model_prompt:
-#
-#   - model_prompt set (or strategy = "model"): the name-status diff
-#     ("git diff --cached --name-status" listing, status TAB path) followed
-#     by the prompt text.
-#   - model_prompt unset and strategy = "deterministic": the full diff
-#     ("git diff --cached"), unchanged from earlier versions. This keeps
-#     commands with their own inline prompt working as before.
 model_cmd = "llm -m gpt-4o-mini 'write a short git commit message for this diff'"
 
 # Optional: prompt appended to the name-status diff on the model's stdin.
