@@ -259,12 +259,12 @@ func Parse(path string) (*Config, error) {
 	if cfg.Commit.Strategy == "" {
 		cfg.Commit.Strategy = "deterministic"
 	}
-	if cfg.Commit.Strategy != "deterministic" && cfg.Commit.Strategy != "model" {
-		return nil, fmt.Errorf("invalid commit strategy %q: must be deterministic or model", cfg.Commit.Strategy)
+	if cfg.Commit.Strategy != "deterministic" && cfg.Commit.Strategy != "model" && cfg.Commit.Strategy != "agent" {
+		return nil, fmt.Errorf("invalid commit strategy %q: must be deterministic, model, or agent", cfg.Commit.Strategy)
 	}
-	// "model" with no model command has nothing to consult; behave exactly
-	// like the deterministic strategy.
-	if cfg.Commit.Strategy == "model" && cfg.Commit.ModelCmd == "" {
+	// "model" and "agent" with no model command have nothing to consult;
+	// behave exactly like the deterministic strategy.
+	if (cfg.Commit.Strategy == "model" || cfg.Commit.Strategy == "agent") && cfg.Commit.ModelCmd == "" {
 		cfg.Commit.Strategy = "deterministic"
 	}
 

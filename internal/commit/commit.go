@@ -18,6 +18,38 @@ const DefaultModelPrompt = `Stdin contains a git diff --cached --name-status lis
 Write one short imperative git commit message, max 72 characters, summarizing
 these changes. Output only the message text itself.`
 
+// MaxAgentDiffBytes caps the full diff handed to the agent command. Larger
+// diffs are cut at a line boundary and a note is appended so the agent knows
+// the tail is missing. This bounds token cost for a daemon that may process
+// arbitrarily large staged changes.
+const MaxAgentDiffBytes = 16 * 1024
+
+// maxAgentMessageRunes caps the agent's message length. Unlike the other
+// strategies the agent may produce multi-line messages (subject + body), so
+// the 72-rune subject cap does not apply; this only stops pathological output.
+const maxAgentMessageRunes = 2000
+
+// maxAgentStdoutBytes bounds how much agent stdout the daemon will buffer.
+// 2000 runes can never exceed 8000 bytes of UTF-8, so this always covers the
+// message cap while a runaway agent command cannot grow the daemon's memory.
+const maxAgentStdoutBytes = maxAgentMessageRunes * 4
+
+// maxModelStdoutBytes bounds model-command stdout the same way. The message
+// is truncated to 72 runes (at most 288 bytes of UTF-8); the margin covers
+// verbose one-liners without letting a runaway command grow the daemon's
+// memory.
+const maxModelStdoutBytes = 4096
+
+// DefaultAgentPrompt is the built-in prompt used when a repo opts into the
+// agent strategy without configuring its own model_prompt. It names the
+// stdin content explicitly: models that aren't told what stdin holds often
+// claim they can't see the input.
+const DefaultAgentPrompt = `Stdin contains the repository path, the current branch,
+the full "git diff --cached" output (possibly truncated with a note), and this
+prompt. Write a git commit message for these changes: one imperative subject
+line of at most 72 characters, optionally followed by a blank line and a short
+body explaining why the change was made. Output only the message text itself.`
+
 type change struct {
 	status  string
 	path    string
@@ -156,6 +188,122 @@ func GenerateModelFirst(diffOutput string, emoji string, fallbackThreshold int, 
 	return applyEmoji(result, emoji)
 }
 
+// GenerateAgent is the agent strategy: the agent command receives the full
+// staged diff on stdin (plus repo path and branch) and its stdout is the
+// commit message, possibly multi-line. The daemon still runs git commit
+// itself — the agent is a message author, never an executor.
+//
+// Cost guardrail: the agent is consulted only when the heuristic message is
+// low-information ("sync N files"), the same trigger the deterministic
+// strategy uses to fall back to model_cmd. Small, well-described changes get
+// the heuristic message and never invoke the agent.
+//
+// On agent error, timeout, or empty output the heuristic message stands.
+func GenerateAgent(nameStatusDiff, fullDiff, repoPath, branch, prompt, emoji string, fallbackThreshold int, agentCmd string, timeout time.Duration) string {
+	msg := Generate(nameStatusDiff, emoji, fallbackThreshold)
+
+	if agentCmd == "" {
+		return msg
+	}
+
+	if !isLowInformation(msg) {
+		return msg
+	}
+
+	result, ok := runAgent(agentCmd, timeout, agentStdin(fullDiff, repoPath, branch, prompt))
+	if !ok {
+		return msg
+	}
+
+	return applyEmoji(result, emoji)
+}
+
+// agentStdin composes the agent command's stdin payload: repo context, the
+// capped full diff, and the prompt.
+func agentStdin(fullDiff, repoPath, branch, prompt string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "repo: %s\nbranch: %s\n\n", repoPath, branch)
+	b.WriteString(truncateDiff(fullDiff, MaxAgentDiffBytes))
+	b.WriteString("\n")
+	b.WriteString(prompt)
+	b.WriteString("\n")
+	return b.String()
+}
+
+// truncateDiff caps diff at max bytes, cutting at a line boundary so the agent
+// never sees a partial line, and appends a note saying the tail was dropped.
+func truncateDiff(diff string, max int) string {
+	if len(diff) <= max {
+		return diff
+	}
+	cut := diff[:max]
+	if idx := strings.LastIndexByte(cut, '\n'); idx >= 0 {
+		cut = cut[:idx+1]
+	} else {
+		// No newline in the window (a single minified line): cut at a whole
+		// rune boundary so the result is still valid UTF-8.
+		for len(cut) > 0 {
+			r, size := utf8.DecodeLastRuneInString(cut)
+			if r != utf8.RuneError || size != 1 {
+				break
+			}
+			cut = cut[:len(cut)-1]
+		}
+	}
+	return cut + fmt.Sprintf("[git-tend: diff truncated at %d bytes; the remainder is not shown]\n", max)
+}
+
+// boundedWriter stores up to max bytes and silently discards the rest, so a
+// runaway command writing far more than the message cap cannot buffer
+// unbounded output in the daemon's memory.
+type boundedWriter struct {
+	buf []byte
+	max int
+}
+
+func (w *boundedWriter) Write(p []byte) (int, error) {
+	room := w.max - len(w.buf)
+	if room > 0 {
+		if room > len(p) {
+			room = len(p)
+		}
+		w.buf = append(w.buf, p[:room]...)
+	}
+	return len(p), nil
+}
+
+func runAgent(agentCmd string, timeout time.Duration, stdin string) (string, bool) {
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", agentCmd)
+	cmd.Stdin = strings.NewReader(stdin)
+	var out boundedWriter
+	out.max = maxAgentStdoutBytes
+	cmd.Stdout = &out
+	// Without WaitDelay, a grandchild of sh that outlives it and holds the
+	// stdout pipe would keep Wait blocked past the context deadline while the
+	// per-repo flock is held; WaitDelay closes the pipes and returns instead.
+	cmd.WaitDelay = 5 * time.Second
+	if err := cmd.Run(); err != nil {
+		return "", false
+	}
+
+	// NUL bytes are invalid in a git commit message (git commit -m fails with
+	// EINVAL), so strip them and fall back via the emptiness check if nothing
+	// usable remains.
+	result := strings.ReplaceAll(string(out.buf), "\x00", "")
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return "", false
+	}
+
+	return truncateRunes(result, maxAgentMessageRunes), true
+}
+
 func runModel(modelCmd string, modelTimeout time.Duration, modelStdin string) (string, bool) {
 	if modelTimeout == 0 {
 		modelTimeout = 30 * time.Second
@@ -165,12 +313,15 @@ func runModel(modelCmd string, modelTimeout time.Duration, modelStdin string) (s
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", modelCmd)
 	cmd.Stdin = strings.NewReader(modelStdin)
-	out, err := cmd.Output()
-	if err != nil {
+	cmd.WaitDelay = 5 * time.Second
+	var bw boundedWriter
+	bw.max = maxModelStdoutBytes
+	cmd.Stdout = &bw
+	if err := cmd.Run(); err != nil {
 		return "", false
 	}
 
-	result := strings.TrimSpace(string(out))
+	result := strings.TrimSpace(string(bw.buf))
 	if result == "" {
 		return "", false
 	}

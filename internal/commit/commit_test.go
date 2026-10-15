@@ -1,9 +1,11 @@
 package commit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestGenerate(t *testing.T) {
@@ -346,4 +348,241 @@ func TestTruncateRunesIsRuneSafe(t *testing.T) {
 			}
 		})
 	}
+}
+
+// agentLowInfoDiff produces a heuristic message of "sync N files" so the
+// agent strategy's low-information trigger fires.
+func agentLowInfoDiff() string {
+	return "M\ta/1\nM\ta/2\nM\ta/3\nM\tb/1\nM\tb/2\nM\tb/3"
+}
+
+func TestGenerateAgentPassesMultiLineMessageThrough(t *testing.T) {
+	agentCmd := "printf 'subject line\n\nbody explaining the why\n'"
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, agentCmd, 30*time.Second)
+
+	want := "🐌 subject line\n\nbody explaining the why"
+	if result != want {
+		t.Errorf("GenerateAgent() = %q, want %q", result, want)
+	}
+}
+
+func TestGenerateAgentKeepsAgentEmoji(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "echo '📝 rewrite the parser'", 30*time.Second)
+
+	if result != "📝 rewrite the parser" {
+		t.Errorf("GenerateAgent() = %q, want %q", result, "📝 rewrite the parser")
+	}
+}
+
+func TestGenerateAgentFallbackOnEmptyOutput(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "true", 5*time.Second)
+
+	if !strings.HasPrefix(result, "🐌 sync ") {
+		t.Errorf("expected heuristic fallback, got %q", result)
+	}
+}
+
+func TestGenerateAgentFallbackOnError(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "exit 1", 5*time.Second)
+
+	if !strings.HasPrefix(result, "🐌 sync ") {
+		t.Errorf("expected heuristic fallback, got %q", result)
+	}
+}
+
+func TestGenerateAgentFallbackOnTimeout(t *testing.T) {
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "", "🐌", 1, "sleep 60", 100*time.Millisecond)
+
+	if !strings.HasPrefix(result, "🐌 sync ") {
+		t.Errorf("expected heuristic fallback, got %q", result)
+	}
+}
+
+func TestGenerateAgentNotConsultedForInformativeHeuristic(t *testing.T) {
+	// The heuristic message "add foo.txt" is informative, so the agent must
+	// never run — this is the cost guardrail for small changes.
+	result := GenerateAgent("A\tfoo.txt", "full diff", "/repo", "main", "", "🐌", 1, "echo 'agent wrote this'", 30*time.Second)
+
+	if result != "🐌 add foo.txt" {
+		t.Errorf("GenerateAgent() = %q, want %q", result, "🐌 add foo.txt")
+	}
+}
+
+func TestGenerateAgentReceivesStdin(t *testing.T) {
+	fullDiff := "diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go"
+	agentCmd := `input=$(cat); count=$(printf '%s\n' "$input" | grep -c -e '^repo: /tmp/repo$' -e '^branch: feature$' -e '^diff --git a/src/a.go b/src/a.go$' -e '^prompt text here$'); echo "saw $count of 4"`
+	result := GenerateAgent(agentLowInfoDiff(), fullDiff, "/tmp/repo", "feature", "prompt text here", "🐌", 1, agentCmd, 30*time.Second)
+
+	if result != "🐌 saw 4 of 4" {
+		t.Errorf("expected all four stdin lines counted, got %q", result)
+	}
+}
+
+func TestGenerateAgentUsesDefaultPrompt(t *testing.T) {
+	agentCmd := "if grep -q 'imperative subject'; then echo 'default prompt present'; else echo 'default prompt missing'; fi"
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", DefaultAgentPrompt, "🐌", 1, agentCmd, 30*time.Second)
+
+	if result != "🐌 default prompt present" {
+		t.Errorf("expected default prompt on stdin, got %q", result)
+	}
+}
+
+func TestGenerateAgentCustomPromptOverridesDefault(t *testing.T) {
+	agentCmd := "if grep -q 'house style'; then echo 'custom prompt used'; else echo 'default used'; fi"
+	result := GenerateAgent(agentLowInfoDiff(), "full diff", "/repo", "main", "Use the house style.", "🐌", 1, agentCmd, 30*time.Second)
+
+	if result != "🐌 custom prompt used" {
+		t.Errorf("expected custom prompt on stdin, got %q", result)
+	}
+}
+
+func TestGenerateAgentTruncatesOversizedDiff(t *testing.T) {
+	// A diff well over MaxAgentDiffBytes must reach the agent capped at a
+	// line boundary with the truncation note, so the agent knows the tail
+	// is missing.
+	fullDiff := "diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n" +
+		strings.Repeat("line of change content\n", 1000) // ~22.5 KiB > 16 KiB
+	// Read all of stdin once, then check both the prompt and the
+	// truncation note against it; echo how many of the two were seen.
+	agentCmd := `input=$(cat); n=0; echo "$input" | grep -q 'prompt text here' && n=$((n+1)); echo "$input" | grep -q '\[git-tend: diff truncated' && n=$((n+1)); echo "saw $n of 2"`
+	result := GenerateAgent(agentLowInfoDiff(), fullDiff, "/repo", "main", "prompt text here", "🐌", 1, agentCmd, 30*time.Second)
+
+	if result != "🐌 saw 2 of 2" {
+		t.Errorf("expected both the prompt and the truncation note on the agent's stdin, got %q", result)
+	}
+}
+
+func TestTruncateDiff(t *testing.T) {
+	tests := []struct {
+		name string
+		diff string
+		max  int
+	}{
+		{name: "under cap unchanged", diff: "short diff", max: 100},
+		{name: "empty diff unchanged", diff: "", max: 100},
+		{name: "exactly at cap unchanged", diff: strings.Repeat("a\n", 10), max: 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateDiff(tt.diff, tt.max)
+			if got != tt.diff {
+				t.Errorf("truncateDiff() = %q, want unchanged %q", got, tt.diff)
+			}
+		})
+	}
+
+	t.Run("no newline cuts at line boundary", func(t *testing.T) {
+		// A single minified line with no newline in the window: the cut must
+		// still land on a whole-rune boundary (valid UTF-8), not mid-rune.
+		diff := strings.Repeat("é", 30) // 60 bytes, no newline
+		got := truncateDiff(diff, 25)
+		if !strings.Contains(got, "[git-tend: diff truncated") {
+			t.Errorf("expected truncation note in output, got %q", got)
+		}
+		body := strings.TrimSuffix(got, truncationNote(25))
+		if !strings.HasPrefix(diff, body) {
+			t.Errorf("expected cut content to be a prefix of the diff, got %q", body)
+		}
+		if !utf8.ValidString(body) {
+			t.Errorf("expected valid UTF-8 after cut, got %q", body)
+		}
+		if got := truncateDiff("\n"+strings.Repeat("a", 30), 10); !strings.HasPrefix(got, "\n") {
+			t.Errorf("expected newline at index 0 to be kept, got %q", got)
+		}
+	})
+
+	t.Run("mid-string newline cuts just after it", func(t *testing.T) {
+		// A window that contains a newline somewhere in the middle (not at
+		// index 0): the cut must end just after that newline, so the agent
+		// never sees a partial line.
+		diff := "abcdefghij\nklmnopqrst"
+		got := truncateDiff(diff, 15)
+		if !strings.Contains(got, "[git-tend: diff truncated") {
+			t.Errorf("expected truncation note in output, got %q", got)
+		}
+		body := strings.TrimSuffix(got, truncationNote(15))
+		if want := "abcdefghij\n"; body != want {
+			t.Errorf("expected cut to end just after the mid-string newline, got %q, want %q", body, want)
+		}
+		if !strings.HasSuffix(body, "\n") {
+			t.Errorf("expected cut to end with a newline, got %q", body)
+		}
+	})
+}
+
+// truncationNote reconstructs the note truncateDiff appends for a given cap.
+func truncationNote(max int) string {
+	return fmt.Sprintf("[git-tend: diff truncated at %d bytes; the remainder is not shown]\n", max)
+}
+
+func TestRunAgentCapsMessageLength(t *testing.T) {
+	long := strings.Repeat("x", maxAgentMessageRunes+500)
+	got, ok := runAgent("cat", 30*time.Second, long)
+	if !ok {
+		t.Fatal("expected ok output")
+	}
+	if got != strings.Repeat("x", maxAgentMessageRunes) {
+		t.Errorf("expected message capped at %d runes, got %d", maxAgentMessageRunes, len([]rune(got)))
+	}
+}
+
+func TestRunAgentStripsNULBytes(t *testing.T) {
+	// NUL bytes make `git commit -m` fail with EINVAL, so the agent's output
+	// must come out clean instead of wedging the repo in a stuck state.
+	got, ok := runAgent(`printf 'msg\000tail'`, 30*time.Second, "")
+	if !ok {
+		t.Fatal("expected ok output")
+	}
+	if strings.ContainsRune(got, '\x00') {
+		t.Errorf("expected NUL bytes stripped, got %q", got)
+	}
+	if got != "msgtail" {
+		t.Errorf("expected NUL removal to join text, got %q", got)
+	}
+}
+
+func TestRunAgentWaitDelayDoesNotBlockOnBackgroundedGrandchild(t *testing.T) {
+	// A backgrounded grandchild (sleep 60 &) holds the stdout pipe open after
+	// sh exits. Without cmd.WaitDelay, cmd.Wait would block for the
+	// grandchild's lifetime (~60s) while the per-repo flock is held; with it,
+	// the pipes are closed and the wait returns well within timeout+WaitDelay.
+	start := time.Now()
+	_, ok := runAgent("sleep 60 &", 100*time.Millisecond, "")
+	elapsed := time.Since(start)
+	if ok {
+		t.Fatalf("expected ok=false for a backgrounded grandchild holding the pipe")
+	}
+	if elapsed > 15*time.Second {
+		t.Errorf("runAgent took %v, expected well under timeout+WaitDelay (~5s); the backgrounded sleep must not block the wait", elapsed)
+	}
+}
+
+func TestBoundedWriterDiscardsBeyondCap(t *testing.T) {
+	t.Run("single write", func(t *testing.T) {
+		w := &boundedWriter{max: 5}
+		n, err := w.Write([]byte("abcdefgh"))
+		if err != nil || n != 8 {
+			t.Fatalf("Write() = (%d, %v), want (8, nil)", n, err)
+		}
+		if string(w.buf) != "abcde" {
+			t.Errorf("expected only the first 5 bytes buffered, got %q", w.buf)
+		}
+	})
+
+	t.Run("second write respects remaining room", func(t *testing.T) {
+		w := &boundedWriter{max: 5}
+		if n, err := w.Write([]byte("abc")); err != nil || n != 3 {
+			t.Fatalf("first Write() = (%d, %v), want (3, nil)", n, err)
+		}
+		// The buffer has 2 bytes of room left, so only "de" of the second
+		// write may be kept; a bug in the room computation (e.g. recomputing
+		// room from max without subtracting the first write) would leak
+		// "defg" past the cap.
+		if n, err := w.Write([]byte("defg")); err != nil || n != 4 {
+			t.Fatalf("second Write() = (%d, %v), want (4, nil)", n, err)
+		}
+		if string(w.buf) != "abcde" {
+			t.Errorf("expected buffer to be exactly %q after both writes, got %q", "abcde", w.buf)
+		}
+	})
 }

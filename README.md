@@ -222,11 +222,23 @@ in_progress_window = "5m"
 #   model: model_cmd is always consulted, falling back to the heuristic on
 #     timeout, error, or empty output. Requires model_cmd — with model_cmd
 #     unset, strategy = "model" behaves exactly like "deterministic".
+#   agent: model_cmd receives the full staged diff (plus repo path and
+#     branch) and authors the commit message — multi-line subject + body
+#     allowed. The daemon still runs git commit itself (see "Agent strategy
+#     and trust model" below). Consulted only when the heuristic message is
+#     low-information, like "deterministic". Requires model_cmd — with
+#     model_cmd unset, strategy = "agent" behaves exactly like
+#     "deterministic".
 strategy = "deterministic"
 
 # Optional: shell command that receives a diff on stdin and prints a commit
 # message on stdout. Under the default strategy it is used as a fallback only
 # when the heuristic produces a low-information message like "sync 14 files".
+#
+# Under strategy = "agent" this is the agent command: it receives the full
+# "git diff --cached" output (capped at 16 KiB, cut at a line boundary with
+# a truncation note appended) preceded by "repo:" and "branch:" lines, and
+# its stdout becomes the commit message. It runs under model_timeout.
 #
 # What the command receives on stdin depends on model_prompt:
 #
@@ -236,6 +248,16 @@ strategy = "deterministic"
 #   - model_prompt unset and strategy = "deterministic": the full diff
 #     ("git diff --cached"), unchanged from earlier versions. This keeps
 #     commands with their own inline prompt working as before.
+#   - strategy = "agent": repo path, branch, and the full capped diff
+#     followed by model_prompt (or a built-in default prompt).
+#
+# Worked example using pi as the message author:
+#
+#   model_cmd = "pi -p --no-session --no-tools"
+#
+# Under the agent strategy the agent never runs git itself; it only prints
+# text that git-tend validates and commits. See the trust-model section.
+#
 model_cmd = "llm -m gpt-4o-mini 'write a short git commit message for this diff'"
 
 # Optional: prompt appended to the name-status diff on the model's stdin.
@@ -245,6 +267,8 @@ model_cmd = "llm -m gpt-4o-mini 'write a short git commit message for this diff'
 #   Write one short imperative git commit message, max 72 characters,
 #   summarizing these changes. Output only the message text itself.
 #
+# When unset under strategy = "agent", a different built-in default prompt
+# is used, describing the full-diff payload and the subject+body format.
 # When unset under the default strategy, nothing is appended (see above).
 #
 # Prompt phrasing matters: name the stdin content explicitly. Prompts that
@@ -259,10 +283,14 @@ model_cmd = "llm -m gpt-4o-mini 'write a short git commit message for this diff'
 # commits, multi-line bodies, etc.).
 # model_prompt = ""
 
-# Timeout for the model command. Default: 30s.
+# Timeout for the model command. Also bounds the agent command under
+# strategy = "agent". Default: 30s.
 model_timeout = "30s"
 
-# Number of directories that triggers fallback to model_cmd.
+# Number of directories that triggers fallback to model_cmd. Under
+# strategy = "agent" this is also the cost guardrail: the agent is consulted
+# only when the heuristic produces a low-information message ("sync N files",
+# which happens when the diff spans more directories than the threshold).
 model_fallback_threshold = 0
 
 # Pass --no-verify to git commit. Use carefully.
@@ -281,6 +309,77 @@ paths = ["secrets/", "*.log"]
 # a repo transitions to stuck or recovers.
 on_stuck = false
 on_recovered = false
+```
+
+---
+
+## Agent strategy and trust model
+
+With `strategy = "agent"` the configured command becomes a **message author**,
+not an executor. The daemon — never the agent — runs every git command:
+
+1. The usual guards run first: per-repo flock, git lock check,
+   `in_progress_window` back-off, debounce quiet-time check.
+2. Changes are staged (`git add`), and the **full** staged diff is captured
+   (`git diff --cached`, capped at 16 KiB with a truncation note).
+3. The agent command runs with `repo:`, `branch:`, the diff, and the prompt on
+   stdin (bounded by `model_timeout`), and its stdout is taken as the commit
+   message (multi-line allowed; whitespace-trimmed, length-capped, emoji
+   applied by the daemon).
+4. The daemon runs `git commit` itself, so hooks, `no_verify`, stuck-flag
+   semantics, and the `COMMIT_EDITMSG` clear-after-commit logic all behave
+   exactly as with the other strategies.
+
+The agent gets exactly one shot per commit: on empty output, error, or
+timeout the heuristic message is used; if the commit then fails (e.g. a
+hook rejects it), the repo is marked stuck and left alone — there is no
+retry-per-tick hammering.
+
+**What the agent command inherits:** the agent runs via `sh -c` as the
+daemon's user with the daemon's **full environment and working directory**
+(git-tend sets no environment or directory override), so anything the
+daemon account can read on that host is reachable from the command. Only
+configure commands you trust with that level of access. Separately, the
+agent sees the **full staged diff**, which may contain secrets — API keys,
+tokens, credentials present in the staged changes — and that content is
+disclosed to whatever process `model_cmd` names. Treat the staged diff as
+shared with the agent command's environment.
+
+**Trusted configuration:** `.gittend` is trusted configuration, and the
+strategies inherit that trust. The agent strategy executes `model_cmd` via
+`sh -c` with the full staged diff on stdin, and `model_cmd` is loaded from
+the per-repo `.gittend` — so anyone who can write a `.gittend` file into a
+scanned repo achieves command execution on the host, with the full diff
+(which may contain secrets) exposed to that command. This is the same trust
+model as the `model` strategy, but the agent path widens the surface by
+sending the full cached diff (which may contain secrets) plus the repo path
+and branch, rather than the name-status diff the `model` strategy sends.
+Treat write access to `.gittend` like write
+access to the daemon's privileges, and consider who can write it in the
+repos you opt in (collaborators, cloned repos).
+
+**Why this design is safe:** the agent only ever sees the repo and produces
+text. It cannot stage, commit, or push anything: the daemon holds the
+per-repo flock for the whole sync, and every mutation goes through the same
+narrow `git add` / `git commit` / `git pull --rebase` / `git push` path used
+by the heuristic strategy. The cost is bounded too: the agent runs at most
+once per commit cycle, and only when the heuristic message is
+low-information ("sync N files"), so small well-described changes never
+invoke it.
+
+**Latency vs. quiet time:** the debounce quiet-time check happens *before*
+staging, and the agent runs *after*. A slow agent therefore does not violate
+the quiet-time guarantee: the diff committed is the snapshot staged at check
+time, and the daemon's own flock prevents concurrent git-tend work from
+interleaving. (A user editing during the agent run is no worse off than with
+any slow commit: their later save lands in the next cycle.)
+
+```toml
+# Example: pi as the commit-message author for a repo.
+[commit]
+strategy = "agent"
+model_cmd = "pi -p --no-session --no-tools"
+model_timeout = "2m"
 ```
 
 ---

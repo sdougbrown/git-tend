@@ -70,6 +70,8 @@ func TestCommitStrategy(t *testing.T) {
 		{name: "explicit deterministic kept", strategy: "deterministic", want: "deterministic"},
 		{name: "model with model_cmd kept", strategy: "model", modelCmd: "llm -m x", want: "model"},
 		{name: "model without model_cmd becomes deterministic", strategy: "model", want: "deterministic"},
+		{name: "agent with model_cmd kept", strategy: "agent", modelCmd: "pi -p --no-session --no-tools", want: "agent"},
+		{name: "agent without model_cmd becomes deterministic", strategy: "agent", want: "deterministic"},
 		{name: "unknown value rejected", strategy: "bogus", wantErr: true, errContains: "strategy"},
 	}
 
