@@ -235,6 +235,10 @@ strategy = "deterministic"
 # message on stdout. Under the default strategy it is used as a fallback only
 # when the heuristic produces a low-information message like "sync 14 files".
 #
+# Command-executing keys like this one are honored only from a [[repo]] entry
+# in the user config (see "Central per-repo config" below) — a .gittend value
+# is ignored with a warning.
+#
 # Under strategy = "agent" this is the agent command: it receives the full
 # "git diff --cached" output (capped at 16 KiB, cut at a line boundary with
 # a truncation note appended) preceded by "repo:" and "branch:" lines, and
@@ -311,6 +315,49 @@ on_stuck = false
 on_recovered = false
 ```
 
+### Central per-repo config (`[[repo]]` in the user config)
+
+Per-repo settings can be set centrally in the user config, keyed by repo
+path. An entry opts the repo in even if it has no `.gittend` file, and is
+honored even if the repo lives outside the configured `roots`. Values set
+here override the repo's `.gittend` per key; keys left unset fall back to
+the repo's `.gittend`, then to built-in defaults. The daemon picks up
+changes on `SIGHUP`, like the rest of the user config.
+
+```toml
+# In ~/.config/git-tend/config.toml
+[[repo]]
+path = "~/Code/my-repo"      # tilde-expanded
+mode = "read-write"
+sync_branch = "main"
+interval = "5m"
+
+debounce = "30s"
+
+[repo.commit]
+strategy = "model"
+model_cmd = "pi -p --no-session --no-tools"
+
+[repo.notify]
+on_stuck = true
+```
+
+**Trust boundary — command-executing keys are user-level only.** A
+`.gittend` file lives inside the repo, so anyone who can write to the repo
+(collaborators, a cloned third-party repo) can write it. Keys that make the
+daemon execute a shell command are therefore honored only from `[[repo]]`
+entries in the user config:
+
+- `commit.model_cmd` — set it under `[repo.commit]` in the user config.
+
+If such a key is set in a repo's `.gittend`, git-tend logs a warning naming
+the repo and the key and ignores the value. Under `strategy = "model"` or
+`strategy = "agent"` with no user-level `model_cmd`, the repo degrades to
+the deterministic strategy.
+
+A `[[repo]]` path that doesn't exist or isn't a git repository is a warning,
+not an error.
+
 ---
 
 ## Agent strategy and trust model
@@ -345,18 +392,18 @@ tokens, credentials present in the staged changes — and that content is
 disclosed to whatever process `model_cmd` names. Treat the staged diff as
 shared with the agent command's environment.
 
-**Trusted configuration:** `.gittend` is trusted configuration, and the
-strategies inherit that trust. The agent strategy executes `model_cmd` via
-`sh -c` with the full staged diff on stdin, and `model_cmd` is loaded from
-the per-repo `.gittend` — so anyone who can write a `.gittend` file into a
-scanned repo achieves command execution on the host, with the full diff
-(which may contain secrets) exposed to that command. This is the same trust
-model as the `model` strategy, but the agent path widens the surface by
-sending the full cached diff (which may contain secrets) plus the repo path
-and branch, rather than the name-status diff the `model` strategy sends.
-Treat write access to `.gittend` like write
-access to the daemon's privileges, and consider who can write it in the
-repos you opt in (collaborators, cloned repos).
+**Trusted configuration:** per-repo settings are a mix of trusted and
+untrusted sources, and the strategies inherit that trust. The agent strategy
+executes `model_cmd` via `sh -c` with the full staged diff on stdin, and
+`model_cmd` is honored **only** from a `[[repo]]` entry in the user config —
+never from a repo's `.gittend`, so anyone who can write a `.gittend` file
+into a scanned repo cannot achieve command execution on the host. The agent
+path widens the surface relative to the `model` strategy by sending the full
+cached diff (which may contain secrets) plus the repo path and branch,
+rather than the name-status diff the `model` strategy sends. Treat write
+access to the user config like write access to the daemon's privileges, and
+consider who can write `.gittend` in the repos you opt in (collaborators,
+cloned repos).
 
 **Why this design is safe:** the agent only ever sees the repo and produces
 text. It cannot stage, commit, or push anything: the daemon holds the
