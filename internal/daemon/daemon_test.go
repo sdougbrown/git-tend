@@ -143,12 +143,10 @@ func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
 		t.Errorf("tick 1: agent command ran %d times, want 1", n)
 	}
 
-	// Simulate the agent's own recovery: flag and provenance record cleared,
-	// hook fixed. The attempt record is deliberately left in place.
+	// Simulate the agent's own recovery: flag cleared, hook fixed. Both
+	// records (attempt and provenance) are deliberately left in place so the
+	// successful tick's cleanup is observed to remove them.
 	if err := os.Remove(filepath.Join(repoDir, ".gittend.stuck")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(gitSync.StuckRecordPath(stateDir, repoDir)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
@@ -156,7 +154,7 @@ func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
 	}
 
 	// Tick 2: sync succeeds; the ok branch resets the displayed budget and
-	// clears the attempt record on disk.
+	// clears the attempt and provenance records on disk.
 	d.tick(ctx)
 
 	sf2 := status.Read(filepath.Join(stateDir, "status.json"))
@@ -169,6 +167,9 @@ func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
 	}
 	if _, err := os.Stat(gitSync.AgentStatePath(stateDir, repoDir)); !os.IsNotExist(err) {
 		t.Error("tick 2: a successful sync should remove the attempt record")
+	}
+	if _, err := os.Stat(gitSync.StuckRecordPath(stateDir, repoDir)); !os.IsNotExist(err) {
+		t.Error("tick 2: a successful sync should remove the provenance record")
 	}
 }
 

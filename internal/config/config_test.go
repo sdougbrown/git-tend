@@ -485,6 +485,16 @@ func TestParseAgentConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit timeout kept", func(t *testing.T) {
+		cfg, err := Parse(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\ntimeout = \"5m\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.Timeout != "5m" {
+			t.Errorf("Timeout = %q, want 5m", cfg.Agent.Timeout)
+		}
+	})
+
 	t.Run("negative max_attempts", func(t *testing.T) {
 		_, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\nmax_attempts = -1\n"), nil, "/tmp/repo")
 		if err == nil || !strings.Contains(err.Error(), "max_attempts") {
