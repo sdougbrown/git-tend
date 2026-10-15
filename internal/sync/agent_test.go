@@ -588,6 +588,38 @@ func TestAgentContextOnStdin(t *testing.T) {
 	}
 }
 
+// The context carries the daemon-observed reason, not the file's: a
+// rewritten reason line passes provenance (stuck_at matches) but must not
+// tell the agent a different failure class.
+func TestAgentContextCarriesDaemonObservedReason(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	stdinFile := filepath.Join(t.TempDir(), "stdin")
+
+	// The daemon observed hook_failed; the record is authoritative.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	// Forge the file's reason to a different value.
+	rewriteStuckReason(t, repo, "push_rejected")
+	cfg := agentTestConfig("cat > "+stdinFile, nil, 2, "10s")
+
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran {
+		t.Fatalf("expected the agent to run (hook_failed is allowed), got ran=%v err=%v", res.Ran, res.Err)
+	}
+
+	data, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "reason = \"hook_failed\"") {
+		t.Errorf("stdin context should carry the daemon-observed reason hook_failed, got:\n%s", s)
+	}
+	if strings.Contains(s, "reason = \"push_rejected\"") {
+		t.Errorf("stdin context should not carry the forged file reason push_rejected, got:\n%s", s)
+	}
+}
+
 // An exit-0 recovery persists the incremented attempt counter, so a new
 // stuck episode right after continues the same budget: attempt 2 of 2 runs,
 // then the cap is exhausted. Without the persisted increment the agent would

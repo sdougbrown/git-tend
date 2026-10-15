@@ -107,6 +107,33 @@ func TestRemoveStuckFlagRefusesWhileAgentLockHeld(t *testing.T) {
 	}
 }
 
+// A repo stuck before the agent feature existed has a stuck flag but no
+// agent state or stuck record files. Unstick must still succeed and remove
+// the flag, tolerating the absent state files.
+func TestRemoveStuckFlagWithoutAgentState(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	repo := t.TempDir()
+	testGitOK(t, repo, "init")
+	testGitOK(t, repo, "config", "user.email", "test@gittend.local")
+	testGitOK(t, repo, "config", "user.name", "git-tend test")
+	testGitOK(t, repo, "commit", "--allow-empty", "-m", "init")
+
+	// Only the stuck flag exists; no agent state or stuck record files.
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), []byte("stuck_at = \"now\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeStuckFlag(repo); err != nil {
+		t.Fatalf("removeStuckFlag: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); !os.IsNotExist(err) {
+		t.Error("stuck flag should be removed")
+	}
+}
+
 func testGitOK(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
