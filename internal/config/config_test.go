@@ -486,7 +486,7 @@ func TestParseAgentConfig(t *testing.T) {
 	})
 
 	t.Run("explicit timeout kept", func(t *testing.T) {
-		cfg, err := Parse(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\ntimeout = \"5m\"\n"))
+		cfg, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"true\"\ntimeout = \"5m\"\n"), nil, "/tmp/repo")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -354,10 +354,10 @@ func removeStuckFlagIfCurrent(repoPath, stuckAt string) error {
 	return os.Remove(filepath.Join(repoPath, ".gittend.stuck"))
 }
 
-// defaultAgentMaxAttempts mirrors the default config.Parse applies; RunStuckAgent
-// also guards on it so callers passing an un-Parsed config don't get a
-// permanently disabled agent (MaxAttempts 0 would trip the cap immediately).
-const defaultAgentMaxAttempts = 2
+// RunStuckAgent also guards on the default so callers passing an un-Parsed
+// config (tests, direct callers) don't get a permanently disabled agent
+// (MaxAttempts 0 would trip the cap immediately).
+const defaultAgentMaxAttempts = config.DefaultAgentMaxAttempts
 
 // maxStuckFileBytes caps how much of the repo-controlled stuck file is read.
 const maxStuckFileBytes = 1 << 20

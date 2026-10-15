@@ -65,6 +65,10 @@ type RepoEntry struct {
 // memory/config repo is a different risk class than rerunning a hook.
 var StuckReasons = []string{"hook_failed", "push_rejected", "rebase_conflict", "other"}
 
+// DefaultAgentMaxAttempts is the default [agent] max_attempts. It is exported
+// so RunStuckAgent's un-Parsed-config guard applies the same value.
+const DefaultAgentMaxAttempts = 2
+
 type AgentConfig struct {
 	OnStuckCmd     string   `toml:"on_stuck_cmd"`
 	AllowedReasons []string `toml:"allowed_reasons"`
@@ -241,7 +245,7 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 			return nil, err
 		}
 		if !rawAgentMaxAttemptsPresent(entries[i].Raw) {
-			probe.Agent.MaxAttempts = 2
+			probe.Agent.MaxAttempts = DefaultAgentMaxAttempts
 		}
 		if err := finalizeConfig(&probe); err != nil {
 			return nil, fmt.Errorf("invalid user repo entry for %s: %w", entries[i].Path, err)
@@ -431,7 +435,7 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 	}
 
 	if !maxAttemptsPresent {
-		cfg.Agent.MaxAttempts = 2
+		cfg.Agent.MaxAttempts = DefaultAgentMaxAttempts
 	}
 
 	if err := finalizeConfig(&cfg); err != nil {
