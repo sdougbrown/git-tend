@@ -110,27 +110,9 @@ func TestRunStatusEmptyRepos(t *testing.T) {
 	}
 	status.Write(filepath.Join(stateDir, "status.json"), sf)
 
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	origStdout := os.Stdout
-	os.Stdout = w
+	out := captureStatus(t)
 
-	err = runStatus(&cobra.Command{}, nil)
-	if err != nil {
-		t.Fatalf("runStatus failed: %v", err)
-	}
-
-	w.Close()
-	os.Stdout = origStdout
-
-	data, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !strings.Contains(string(data), "No managed repos found yet") {
-		t.Errorf("output = %q, want it to contain %q", string(data), "No managed repos found yet")
+	if !strings.Contains(out, "No managed repos found yet") {
+		t.Errorf("output = %q, want it to contain %q", out, "No managed repos found yet")
 	}
 }
