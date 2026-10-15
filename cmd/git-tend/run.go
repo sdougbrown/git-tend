@@ -34,7 +34,7 @@ func runRepo(cmd *cobra.Command, args []string) error {
 
 	userCfg, err := config.ParseUserConfig(filepath.Join(paths.ConfigDir(), "config.toml"))
 	if err != nil {
-		userCfg = &config.UserConfig{}
+		return fmt.Errorf("loading user config: %w", err)
 	}
 	entry := userCfg.EntryFor(repoPath)
 
