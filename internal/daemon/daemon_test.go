@@ -360,6 +360,22 @@ func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
 
 	// The slow agent's budget lands on disk once it finishes.
 	waitAgentBudget(t, stateDir, agentRepo, 1)
+
+	// Tick 3 while no run is in flight: the agent runs again (attempt 2 of
+	// 2, still in flight). Tick 4 is refused by the in-flight run; its
+	// result reports MaxAttempts 0 (not engaged) and must not wipe the
+	// displayed budget back to 1/0.
+	d.tick(ctx)
+	d.tick(ctx)
+	time.Sleep(200 * time.Millisecond) // let the refused run's goroutine apply
+	sf = status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	rs := sf.Repos[agentRepo]
+	if rs.AgentAttempts != 1 || rs.AgentMaxAttempts != 2 {
+		t.Errorf("budget after refused tick = %d/%d, want 1/2 (a refused run must not clobber the budget)", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
 }
 
 func TestPIDRefusal(t *testing.T) {
@@ -511,7 +527,7 @@ func TestRescanRoots(t *testing.T) {
 	}
 
 	cfg := &config.UserConfig{
-		Roots:    []string{tempRoot},
+		Roots:     []string{tempRoot},
 		ScanDepth: 2,
 	}
 	stateDir := t.TempDir()

@@ -425,12 +425,27 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 		res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
 		d.mu.Lock()
 		rs := d.repoStatus[repo.Path]
-		// Bump UpdatedAt when the budget actually changed: on a repeat stuck
-		// tick the state is already "stuck", so tick doesn't bump, and
-		// without this the merge in writeStatus keeps the stale on-disk
-		// budget (the display freezes at 1/2 and "agent exhausted" never
-		// shows).
-		if rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts {
+		// Apply the result only when the run was engaged (MaxAttempts > 0 —
+		// a lock-refused run reports 0) and the agent is still enabled at
+		// completion: an operator who removed on_stuck_cmd mid-run must not
+		// have the clear path's 0/0 overwritten by the orphaned result.
+		// The result applies only when the run was engaged (MaxAttempts > 0
+		// — a lock-refused run reports 0) and the agent is still enabled
+		// at completion: an operator who removed on_stuck_cmd mid-run must
+		// not have the clear path's 0/0 overwritten by the orphaned
+		// result. Bump UpdatedAt when the budget actually changed: on a
+		// repeat stuck tick the state is already "stuck", so tick doesn't
+		// bump, and without this the merge in writeStatus keeps the stale
+		// on-disk budget (the display freezes at 1/2 and "agent
+		// exhausted" never shows).
+		engaged := false
+		for _, r := range d.repos {
+			if r.Path == repo.Path {
+				engaged = r.Config != nil && r.Config.Agent.Enabled()
+				break
+			}
+		}
+		if engaged && res.MaxAttempts > 0 && (rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts) {
 			rs.AgentAttempts = res.Attempts
 			rs.AgentMaxAttempts = res.MaxAttempts
 			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
