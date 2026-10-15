@@ -261,7 +261,9 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 	go func() {
 		defer stdin.Close()
-		writeAgentContext(stdin, repoPath, cfg.SyncBranch, rec, stuck)
+		if err := writeAgentContext(stdin, repoPath, cfg.SyncBranch, rec, stuck); err != nil {
+			fmt.Fprintf(os.Stderr, "agent unstick: writing context: %v\n", err)
+		}
 	}()
 
 	res.Ran = true
@@ -454,18 +456,40 @@ func writeStuckRecord(stateDir, repoPath, stuckAt, reason string) error {
 	return writeJSONAtomic(StuckRecordPath(stateDir, repoPath), rec)
 }
 
+// agentContext is the structured context document the agent command receives
+// on stdin.
+type agentContext struct {
+	Repo         string `toml:"repo"`
+	SyncBranch   string `toml:"sync_branch"`
+	StuckAt      string `toml:"stuck_at"`
+	Reason       string `toml:"reason"`
+	LastCommand  string `toml:"last_command"`
+	LastExitCode int    `toml:"last_exit_code"`
+	LastOutput   string `toml:"last_output"`
+}
+
 // writeAgentContext writes the structured context document the agent command
 // receives on stdin: the daemon-observed reason (authoritative for the
 // allowlist) plus the stuck file's diagnostic fields, the repo path, and the
 // sync branch. The repo-local file is untrusted, so its reason is not used.
-func writeAgentContext(w io.Writer, repoPath, syncBranch string, rec *stuckRecord, stuck *stuckFile) {
-	fmt.Fprintf(w, "repo = %q\n", repoPath)
-	fmt.Fprintf(w, "sync_branch = %q\n", syncBranch)
-	fmt.Fprintf(w, "stuck_at = %q\n", rec.StuckAt)
-	fmt.Fprintf(w, "reason = %q\n", rec.Reason)
-	fmt.Fprintf(w, "last_command = %q\n", stuck.LastCommand)
-	fmt.Fprintf(w, "last_exit_code = %d\n", stuck.LastExitCode)
-	fmt.Fprintf(w, "last_output = \"\"\"\n%s\"\"\"\n", stuck.LastOutput)
+// The document is marshaled (not hand-formatted) so repo-influenced output
+// containing TOML-hostile bytes cannot forge context fields.
+func writeAgentContext(w io.Writer, repoPath, syncBranch string, rec *stuckRecord, stuck *stuckFile) error {
+	ctx := agentContext{
+		Repo:         repoPath,
+		SyncBranch:   syncBranch,
+		StuckAt:      rec.StuckAt,
+		Reason:       rec.Reason,
+		LastCommand:  stuck.LastCommand,
+		LastExitCode: stuck.LastExitCode,
+		LastOutput:   stuck.LastOutput,
+	}
+	data, err := toml.Marshal(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
 }
 
 func readAgentAttempt(path string) (agentAttempt, error) {
