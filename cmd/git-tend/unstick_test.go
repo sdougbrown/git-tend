@@ -12,12 +12,15 @@ import (
 	gitSync "github.com/sdougbrown/git-tend/internal/sync"
 )
 
-func TestRemoveStuckFlagResetsAgentState(t *testing.T) {
+// setupStuckRepoWithAgentState creates a repo with a stuck flag and both
+// agent state records present, returning the repo and state-dir paths.
+func setupStuckRepoWithAgentState(t *testing.T) (repo, stateDir string) {
+	t.Helper()
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	stateDir := paths.StateDir()
+	stateDir = paths.StateDir()
 
-	repo := t.TempDir()
+	repo = t.TempDir()
 	testGitOK(t, repo, "init")
 	testGitOK(t, repo, "config", "user.email", "test@gittend.local")
 	testGitOK(t, repo, "config", "user.name", "git-tend test")
@@ -37,6 +40,11 @@ func TestRemoveStuckFlagResetsAgentState(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	return repo, stateDir
+}
+
+func TestRemoveStuckFlagResetsAgentState(t *testing.T) {
+	repo, stateDir := setupStuckRepoWithAgentState(t)
 
 	if err := removeStuckFlag(repo); err != nil {
 		t.Fatalf("removeStuckFlag: %v", err)
@@ -56,30 +64,7 @@ func TestRemoveStuckFlagResetsAgentState(t *testing.T) {
 }
 
 func TestRemoveStuckFlagRefusesWhileAgentLockHeld(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	stateDir := paths.StateDir()
-
-	repo := t.TempDir()
-	testGitOK(t, repo, "init")
-	testGitOK(t, repo, "config", "user.email", "test@gittend.local")
-	testGitOK(t, repo, "config", "user.name", "git-tend test")
-	testGitOK(t, repo, "commit", "--allow-empty", "-m", "init")
-
-	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), []byte("stuck_at = \"now\"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range []string{
-		gitSync.AgentStatePath(stateDir, repo),
-		gitSync.StuckRecordPath(stateDir, repo),
-	} {
-		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(fmt.Sprintf(`{"repo":%q}`, repo)), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	repo, stateDir := setupStuckRepoWithAgentState(t)
 
 	// Hold the agent lock (simulating an in-flight agent run).
 	lock, err := gitSync.AcquireAgentLock(stateDir, repo)

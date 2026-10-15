@@ -32,23 +32,41 @@ func TestRunStatusAgentStates(t *testing.T) {
 	status.Write(filepath.Join(stateDir, "status.json"), sf)
 
 	out := captureStatus(t)
-	lines := map[string]string{}
+	// Group each repo's output: its row plus any indented detail lines that
+	// follow it (agent detail renders outside the fixed-width grid).
+	blocks := map[string]string{}
+	current := ""
 	for _, line := range strings.Split(out, "\n") {
+		matched := ""
 		for repo := range sf.Repos {
 			if strings.HasPrefix(line, repo) {
-				lines[repo] = line
+				matched = repo
+				break
 			}
+		}
+		if matched != "" {
+			current = matched
+			blocks[current] = line
+			continue
+		}
+		if current != "" && strings.TrimSpace(line) != "" {
+			blocks[current] += "\n" + line
 		}
 	}
 
-	if got := lines["/repos/agent-pending"]; !strings.Contains(got, "stuck (agent pending, attempts 1/2)") {
-		t.Errorf("pending row = %q, want it to contain \"stuck (agent pending, attempts 1/2)\"", got)
+	if got := blocks["/repos/agent-pending"]; !strings.Contains(got, "stuck") || !strings.Contains(got, "agent pending, attempts 1/2") {
+		t.Errorf("pending block = %q, want it to contain stuck with agent pending, attempts 1/2", got)
 	}
-	if got := lines["/repos/agent-exhausted"]; !strings.Contains(got, "stuck (agent exhausted, attempts 2/2)") {
-		t.Errorf("exhausted row = %q, want it to contain \"stuck (agent exhausted, attempts 2/2)\"", got)
+	if got := blocks["/repos/agent-exhausted"]; !strings.Contains(got, "agent exhausted, attempts 2/2") {
+		t.Errorf("exhausted block = %q, want it to contain agent exhausted, attempts 2/2", got)
 	}
-	if got := lines["/repos/plain-stuck"]; strings.Contains(got, "agent") {
-		t.Errorf("no-agent row = %q, want plain stuck (AgentMaxAttempts 0 guard)", got)
+	// The agent detail must not break the column grid: the STATE column of the
+	// row itself stays short.
+	if got := blocks["/repos/agent-pending"]; strings.Count(got, "\n") != 1 {
+		t.Errorf("pending block = %q, want exactly one detail line", got)
+	}
+	if got := blocks["/repos/plain-stuck"]; strings.Contains(got, "agent") {
+		t.Errorf("no-agent block = %q, want plain stuck (AgentMaxAttempts 0 guard)", got)
 	}
 }
 
