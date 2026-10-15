@@ -510,6 +510,7 @@ manual-only for that repo.
 ### Safety notes
 
 - **The command runs with the daemon's full user privileges** (launchd/systemd context). It can read and write anything your user can. Only point it at repos — and commands — you trust.
+- The attempt budget limits accidental retry loops. It does not constrain a misbehaving agent command, which runs as your user and can edit git-tend's state. Only configure commands you trust.
 - The command — and everything that bounds it: the reason allowlist, the attempt budget, and the timeout — can only come from the user config. A repo cannot arm the agent, opt itself into `rebase_conflict`, or raise its own budget: a `[agent]` table in `.gittend` is ignored with a warning.
 - `rebase_conflict` is excluded from the default allowlist on purpose: auto-resolving merges in a memory/config repo is a different risk class than rerunning a hook. You can opt in explicitly with `allowed_reasons = ["hook_failed", "push_rejected", "rebase_conflict", "other"]`, but think first.
 - The agent run can take up to `timeout` (default 10m). It runs in the background: the daemon tick does not wait for it, so other repos in that tick are not delayed. A tick while a run is in flight starts a run that the per-repo lock refuses immediately, so at most one run per repo is ever in flight. During the run, syncs still skip the repo because the stuck flag is present — the agent cannot race the sync loop.

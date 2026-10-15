@@ -48,8 +48,10 @@ type stuckRecord struct {
 // stuck file: it resets only when a sync actually succeeds or a human runs
 // `git-tend unstick`. An agent exit 0 alone doesn't reset it — otherwise an
 // agent that clears the flag without actually fixing the repo would re-arm a
-// full budget on every failed sync. Episode records the stuck_at of the last
-// episode seen, for diagnostics only.
+// full budget on every failed sync. The budget bounds accidental retry loops;
+// it does not constrain the agent command, which runs as the same user and can
+// edit this file. Episode records the stuck_at of the last episode seen, for
+// diagnostics only.
 type agentAttempt struct {
 	Episode      string `json:"episode"`
 	Attempts     int    `json:"attempts"`
@@ -196,9 +198,8 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 	// The budget is per repo, not per stuck file: a new episode — even one
 	// created right after the agent's own exit 0 — does not reset the
-	// counter. Rewriting stuck_at can't help an attacker either: the
-	// provenance match gates whether the agent runs at all, and the counter
-	// only resets on a successful sync or a human unstick.
+	// counter. The provenance match gates whether the agent runs at all; the
+	// counter only resets on a successful sync or a human unstick.
 	res.Attempts = record.Attempts
 	if record.Attempts >= maxAttempts {
 		// The budget was already spent on a prior run; the daemon's per-tick
@@ -399,9 +400,11 @@ func AgentLockPath(stateDir, repoPath string) string {
 	return filepath.Join(stateDir, "agent", hex.EncodeToString(hash[:])+".lock")
 }
 
-// AcquireAgentLock takes the per-repo agent-run flock. Callers that mutate
-// agent-relevant state (RunStuckAgent, writeStuck, `git-tend unstick`) hold it
-// so their record/flag writes serialize against each other. The fd returned is
+// AcquireAgentLock takes the per-repo agent-run flock. Daemon-side callers that
+// mutate agent-relevant state (RunStuckAgent, writeStuck, `git-tend unstick`,
+// the sync reset) hold it so their record/flag writes serialize against each
+// other. The lock does not restrict the agent command, which runs as the same
+// user and can modify the state dir. The fd returned is
 // read-only (flock(2) needs no write access) and must be passed to the agent
 // command via cmd.ExtraFiles so the lock outlives the daemon process (see
 // RunStuckAgent).

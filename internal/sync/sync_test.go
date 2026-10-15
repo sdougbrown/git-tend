@@ -144,6 +144,42 @@ func TestSyncReadOnly(t *testing.T) {
 	}
 }
 
+func TestSyncSuccessWithoutAgentStateCreatesNoAgentFiles(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-only", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-only",
+		SyncBranch: "main",
+		Interval:   "30s",
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	if _, err := os.Stat(filepath.Join(stateDir, "agent")); !os.IsNotExist(err) {
+		t.Errorf("agent state dir should not be created by a successful sync with no agent episode (stat err: %v)", err)
+	}
+	if _, err := os.Stat(AgentLockPath(stateDir, repo)); !os.IsNotExist(err) {
+		t.Errorf("agent lock file should not be created by a successful sync with no agent episode (stat err: %v)", err)
+	}
+}
+
 func TestSyncReadWrite(t *testing.T) {
 	remote := gitInitBare(t)
 	defer os.RemoveAll(remote)
