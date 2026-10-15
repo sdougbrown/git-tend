@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,5 +125,212 @@ func TestParseStrategyDeterministicBackwardCompat(t *testing.T) {
 	}
 	if cfg.Commit.Strategy != "deterministic" {
 		t.Errorf("Strategy = %q, want deterministic", cfg.Commit.Strategy)
+	}
+}
+
+func TestParseUserConfigRepoEntries(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	data := `
+[[repo]]
+path = "~/Code/one"
+mode = "read-write"
+interval = "5m"
+
+[repo.commit]
+model_cmd = "run-it"
+
+[[repo]]
+path = "$HOME/Code/two"
+sync_branch = "dev"
+`
+	cfg, err := ParseUserConfig(writeConfig(t, data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Repos) != 2 {
+		t.Fatalf("expected 2 repo entries, got %d", len(cfg.Repos))
+	}
+	if cfg.Repos[0].Path != filepath.Join(os.Getenv("HOME"), "Code", "one") {
+		t.Errorf("Path[0] = %q, want tilde-expanded", cfg.Repos[0].Path)
+	}
+	if cfg.Repos[0].Mode != "read-write" || cfg.Repos[0].Interval != "5m" {
+		t.Errorf("unexpected entry[0]: %+v", cfg.Repos[0].Config)
+	}
+	if cfg.Repos[0].Commit.ModelCmd != "run-it" {
+		t.Errorf("ModelCmd = %q, want run-it", cfg.Repos[0].Commit.ModelCmd)
+	}
+	if cfg.Repos[1].Path != filepath.Join(os.Getenv("HOME"), "Code", "two") {
+		t.Errorf("Path[1] = %q, want $HOME-expanded", cfg.Repos[1].Path)
+	}
+	if cfg.Repos[1].SyncBranch != "dev" {
+		t.Errorf("SyncBranch = %q, want dev", cfg.Repos[1].SyncBranch)
+	}
+}
+
+func TestParseUserConfigRepoEntryMissingPath(t *testing.T) {
+	_, err := ParseUserConfig(writeConfig(t, "[[repo]]\nmode = \"read-only\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "missing path") {
+		t.Errorf("expected missing-path error, got: %v", err)
+	}
+}
+
+func TestParseUserConfigRepoEntryDuplicatesMerge(t *testing.T) {
+	data := `
+[[repo]]
+path = "/tmp/repo-a"
+mode = "read-write"
+interval = "2m"
+
+[[repo]]
+path = "/tmp/repo-a/"
+sync_branch = "dev"
+mode = "read-only"
+`
+	cfg, err := ParseUserConfig(writeConfig(t, data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("expected duplicate entries to collapse, got %d", len(cfg.Repos))
+	}
+	// Later entry wins per key; keys only it sets are kept.
+	if cfg.Repos[0].Mode != "read-only" {
+		t.Errorf("Mode = %q, want read-only (later entry)", cfg.Repos[0].Mode)
+	}
+	if cfg.Repos[0].Interval != "2m" {
+		t.Errorf("Interval = %q, want 2m (earlier entry kept)", cfg.Repos[0].Interval)
+	}
+	if cfg.Repos[0].SyncBranch != "dev" {
+		t.Errorf("SyncBranch = %q, want dev", cfg.Repos[0].SyncBranch)
+	}
+}
+
+func TestResolveMergePrecedence(t *testing.T) {
+	gittend := writeConfig(t, "mode = \"read-write\"\ninterval = \"2m\"\nsync_branch = \"main\"\n")
+	entry := &RepoEntry{
+		Config: Config{
+			Interval:   "7m",
+			Commit:     CommitConfig{Emoji: "🚀"},
+			SyncBranch: "", // unset at user level: falls back to .gittend
+		},
+	}
+
+	cfg, err := Resolve(gittend, entry, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != "read-write" {
+		t.Errorf("Mode = %q, want read-write (unset at user level)", cfg.Mode)
+	}
+	if cfg.Interval != "7m" {
+		t.Errorf("Interval = %q, want 7m (user level wins)", cfg.Interval)
+	}
+	if cfg.SyncBranch != "main" {
+		t.Errorf("SyncBranch = %q, want main (unset at user level)", cfg.SyncBranch)
+	}
+	if cfg.Commit.Emoji != "🚀" {
+		t.Errorf("Emoji = %q, want 🚀 (user level wins)", cfg.Commit.Emoji)
+	}
+	// Defaults apply to the merged result, not per layer.
+	if cfg.Commit.Strategy != "deterministic" {
+		t.Errorf("Strategy = %q, want default deterministic", cfg.Commit.Strategy)
+	}
+	if cfg.Debounce != "" {
+		t.Errorf("Debounce = %q, want empty", cfg.Debounce)
+	}
+}
+
+func TestResolveDefaultsApplyPostMerge(t *testing.T) {
+	// An unset user-level mode must not clobber the .gittend mode with the
+	// built-in default.
+	gittend := writeConfig(t, "mode = \"read-write\"\n")
+	entry := &RepoEntry{Config: Config{SyncBranch: "dev"}}
+
+	cfg, err := Resolve(gittend, entry, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != "read-write" {
+		t.Errorf("Mode = %q, want read-write", cfg.Mode)
+	}
+	if cfg.SyncBranch != "dev" {
+		t.Errorf("SyncBranch = %q, want dev", cfg.SyncBranch)
+	}
+}
+
+func TestResolveEntryOnlyAppliesDefaults(t *testing.T) {
+	// A [[repo]] entry opts a repo in without any .gittend file.
+	cfg, err := Resolve("", &RepoEntry{Config: Config{Mode: "read-write"}}, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != "read-write" || cfg.SyncBranch != "main" || cfg.Commit.Strategy != "deterministic" {
+		t.Errorf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestResolveGittendModelCmdIgnoredWithWarning(t *testing.T) {
+	var warnings []string
+	origWarn := warnf
+	warnf = func(format string, args ...interface{}) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}
+	defer func() { warnf = origWarn }()
+
+	gittend := writeConfig(t, "mode = \"read-write\"\n[commit]\nstrategy = \"model\"\nmodel_cmd = \"evil-cmd\"\n")
+
+	cfg, err := Resolve(gittend, nil, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Commit.ModelCmd != "" {
+		t.Errorf("ModelCmd = %q, want empty (ignored)", cfg.Commit.ModelCmd)
+	}
+	// With no user-level model_cmd, the strategy degrades to deterministic.
+	if cfg.Commit.Strategy != "deterministic" {
+		t.Errorf("Strategy = %q, want deterministic", cfg.Commit.Strategy)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "/tmp/repo") || !strings.Contains(warnings[0], "commit.model_cmd") {
+		t.Errorf("expected warning naming repo and key, got: %v", warnings)
+	}
+}
+
+func TestResolveUserEntryModelCmdHonored(t *testing.T) {
+	gittend := writeConfig(t, "[commit]\nstrategy = \"model\"\nmodel_cmd = \"from-gittend\"\n")
+	entry := &RepoEntry{Config: Config{Commit: CommitConfig{ModelCmd: "from-user"}}}
+
+	var warnings []string
+	origWarn := warnf
+	warnf = func(format string, args ...interface{}) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}
+	defer func() { warnf = origWarn }()
+
+	cfg, err := Resolve(gittend, entry, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Commit.ModelCmd != "from-user" {
+		t.Errorf("ModelCmd = %q, want from-user (user level wins)", cfg.Commit.ModelCmd)
+	}
+	if cfg.Commit.Strategy != "model" {
+		t.Errorf("Strategy = %q, want model", cfg.Commit.Strategy)
+	}
+	if len(warnings) != 1 {
+		t.Errorf("expected one warning for the .gittend model_cmd, got: %v", warnings)
+	}
+}
+
+func TestResolveInvalidGittendValue(t *testing.T) {
+	gittend := writeConfig(t, "mode = \"bogus\"\n")
+	if _, err := Resolve(gittend, nil, "/tmp/repo"); err == nil {
+		t.Error("expected error for invalid mode")
+	}
+}
+
+func TestResolveInvalidUserEntryValue(t *testing.T) {
+	entry := &RepoEntry{Config: Config{Mode: "bogus"}}
+	if _, err := Resolve("", entry, "/tmp/repo"); err == nil {
+		t.Error("expected error for invalid user-level mode")
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
 type Config struct {
@@ -46,6 +48,14 @@ type NotifyConfig struct {
 	OnRecovered bool `toml:"on_recovered"`
 }
 
+// RepoEntry is a user-level [[repo]] entry: per-repo settings set centrally
+// in the user config for the repo at Path. Config is embedded so entry keys
+// sit at the same level as path, with sub-tables like [repo.commit].
+type RepoEntry struct {
+	Path string `toml:"path"`
+	Config
+}
+
 func ParseDuration(s string) (time.Duration, error) {
 	if s == "" {
 		return 0, nil
@@ -54,13 +64,25 @@ func ParseDuration(s string) (time.Duration, error) {
 }
 
 type UserConfig struct {
-	Roots             []string `toml:"roots"`
-	Interval          string   `toml:"interval"`
-	LogLevel          string   `toml:"log_level"`
-	EscalateAfterDays int      `toml:"escalate_after_days"`
-	NetworkTimeout    string   `toml:"network_timeout"`
-	OfflineBackoffCap string   `toml:"offline_backoff_cap"`
-	ScanDepth         int      `toml:"scan_depth"`
+	Roots             []string    `toml:"roots"`
+	Interval          string      `toml:"interval"`
+	LogLevel          string      `toml:"log_level"`
+	EscalateAfterDays int         `toml:"escalate_after_days"`
+	NetworkTimeout    string      `toml:"network_timeout"`
+	OfflineBackoffCap string      `toml:"offline_backoff_cap"`
+	ScanDepth         int         `toml:"scan_depth"`
+	Repos             []RepoEntry `toml:"repo"`
+}
+
+// EntryFor returns the user-level entry for the repo at path, or nil when no
+// [[repo]] entry matches.
+func (uc *UserConfig) EntryFor(path string) *RepoEntry {
+	for i := range uc.Repos {
+		if paths.SamePath(uc.Repos[i].Path, path) {
+			return &uc.Repos[i]
+		}
+	}
+	return nil
 }
 
 var defaultRoots = []string{"~/Code"}
@@ -151,7 +173,38 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 		cfg.ScanDepth = 4
 	}
 
+	entries, err := normalizeRepoEntries(cfg.Repos)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Repos = entries
+
 	return cfg, nil
+}
+
+// normalizeRepoEntries expands entry paths and collapses duplicate entries
+// for the same repo, merging later entries over earlier ones per key so the
+// effective entry for a path is deterministic regardless of ordering.
+func normalizeRepoEntries(entries []RepoEntry) ([]RepoEntry, error) {
+	normalized := make([]RepoEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Path == "" {
+			return nil, fmt.Errorf("repo entry missing path")
+		}
+		entry.Path = paths.ExpandPath(entry.Path)
+		merged := false
+		for i := range normalized {
+			if paths.SamePath(normalized[i].Path, entry.Path) {
+				mergeConfig(&normalized[i].Config, &entry.Config)
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			normalized = append(normalized, entry)
+		}
+	}
+	return normalized, nil
 }
 
 // WriteDefaultConfig writes a commented TOML template to path. If roots is
@@ -204,6 +257,23 @@ offline_backoff_cap = "30m"
 
 # How many directory levels deep to search inside each root.
 scan_depth = 4
+
+# Per-repo settings can be set centrally here instead of (or in addition to)
+# each repo's .gittend. An entry opts the repo in even if it has no .gittend
+# file, and works even if the repo lives outside the configured roots.
+# Values set here override the repo's .gittend per key; keys left unset here
+# fall back to the repo's .gittend.
+#
+# Command-executing keys (like commit.model_cmd below) are honored ONLY from
+# a [[repo]] entry here — the repo's .gittend cannot set them.
+#
+# [[repo]]
+# path = "~/Code/my-repo"
+# mode = "read-write"
+# sync_branch = "main"
+#
+# [repo.commit]
+# model_cmd = "pi -p --no-session --no-tools"
 `
 
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
@@ -212,6 +282,126 @@ scan_depth = 4
 	return nil
 }
 
+// warnf is a variable so tests can capture warnings.
+var warnf = func(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "WARN: "+format+"\n", args...)
+}
+
+// userOnlyKeys lists per-repo keys honored only from a user-config [[repo]]
+// entry: a .gittend value for any of these is ignored with a warning, since
+// the keys execute commands with the daemon's privileges and a repo writer
+// must not control them. To add another key, add an entry here and a
+// corresponding branch in mergeConfig.
+var userOnlyKeys = []struct {
+	key   string
+	get   func(*Config) string
+	clear func(*Config)
+}{
+	{
+		key:   "commit.model_cmd",
+		get:   func(c *Config) string { return c.Commit.ModelCmd },
+		clear: func(c *Config) { c.Commit.ModelCmd = "" },
+	},
+}
+
+// warnUserOnlyKeys strips user-only keys from a .gittend-parsed config and
+// warns about each one that was set.
+func warnUserOnlyKeys(cfg *Config, repoPath string) {
+	for _, k := range userOnlyKeys {
+		if k.get(cfg) == "" {
+			continue
+		}
+		warnf("%s: ignoring %s from .gittend; set it in a [[repo]] entry of the user config instead", repoPath, k.key)
+		k.clear(cfg)
+	}
+}
+
+// mergeConfig overlays src onto dst per key. Zero values count as unset, so
+// only keys explicitly set in src take effect; note this means a user-level
+// false or 0 cannot clear a value set in .gittend.
+func mergeConfig(dst, src *Config) {
+	if src.Mode != "" {
+		dst.Mode = src.Mode
+	}
+	if src.SyncBranch != "" {
+		dst.SyncBranch = src.SyncBranch
+	}
+	if src.Interval != "" {
+		dst.Interval = src.Interval
+	}
+	if src.Debounce != "" {
+		dst.Debounce = src.Debounce
+	}
+	if src.Commit.Strategy != "" {
+		dst.Commit.Strategy = src.Commit.Strategy
+	}
+	if src.Commit.Emoji != "" {
+		dst.Commit.Emoji = src.Commit.Emoji
+	}
+	if src.Commit.ModelCmd != "" {
+		dst.Commit.ModelCmd = src.Commit.ModelCmd
+	}
+	if src.Commit.ModelPrompt != "" {
+		dst.Commit.ModelPrompt = src.Commit.ModelPrompt
+	}
+	if src.Commit.ModelTimeout != "" {
+		dst.Commit.ModelTimeout = src.Commit.ModelTimeout
+	}
+	if src.Commit.FallbackThresh != 0 {
+		dst.Commit.FallbackThresh = src.Commit.FallbackThresh
+	}
+	if src.Commit.NoVerify {
+		dst.Commit.NoVerify = true
+	}
+	if src.Commit.InProgressWindow != "" {
+		dst.Commit.InProgressWindow = src.Commit.InProgressWindow
+	}
+	if len(src.Include.Paths) > 0 {
+		dst.Include.Paths = src.Include.Paths
+	}
+	if len(src.Exclude.Paths) > 0 {
+		dst.Exclude.Paths = src.Exclude.Paths
+	}
+	if src.Notify.OnStuck {
+		dst.Notify.OnStuck = true
+	}
+	if src.Notify.OnRecovered {
+		dst.Notify.OnRecovered = true
+	}
+}
+
+// Resolve returns the effective per-repo config for the repo at repoPath:
+// the user-level [[repo]] entry (if any) merged per key over the repo's
+// .gittend (if any), with defaults and validation applied once to the merged
+// result. gittendPath may be empty when the repo has no .gittend file.
+func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, error) {
+	var cfg Config
+
+	if gittendPath != "" {
+		data, err := os.ReadFile(gittendPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading config file %s: %w", gittendPath, err)
+		}
+		if err := toml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parsing config %s: %w", gittendPath, err)
+		}
+		warnUserOnlyKeys(&cfg, repoPath)
+	}
+
+	if entry != nil {
+		mergeConfig(&cfg, &entry.Config)
+	}
+
+	if err := finalizeConfig(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// Parse reads and finalizes a standalone .gittend config. It does not
+// enforce the user-config-only restrictions on command-executing keys;
+// Resolve is the entry point that merges user-level entries and enforces
+// them.
 func Parse(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -223,11 +413,19 @@ func Parse(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 
+	if err := finalizeConfig(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// finalizeConfig applies built-in defaults and validation to a config.
+func finalizeConfig(cfg *Config) error {
 	if cfg.Mode == "" {
 		cfg.Mode = "read-only"
 	}
 	if cfg.Mode != "read-only" && cfg.Mode != "read-write" {
-		return nil, fmt.Errorf("invalid mode %q: must be read-only or read-write", cfg.Mode)
+		return fmt.Errorf("invalid mode %q: must be read-only or read-write", cfg.Mode)
 	}
 
 	if cfg.SyncBranch == "" {
@@ -236,19 +434,19 @@ func Parse(path string) (*Config, error) {
 
 	if cfg.Interval != "" {
 		if _, err := time.ParseDuration(cfg.Interval); err != nil {
-			return nil, fmt.Errorf("invalid interval %q: %w", cfg.Interval, err)
+			return fmt.Errorf("invalid interval %q: %w", cfg.Interval, err)
 		}
 	}
 
 	if cfg.Debounce != "" {
 		if _, err := time.ParseDuration(cfg.Debounce); err != nil {
-			return nil, fmt.Errorf("invalid debounce %q: %w", cfg.Debounce, err)
+			return fmt.Errorf("invalid debounce %q: %w", cfg.Debounce, err)
 		}
 	}
 
 	if cfg.Commit.InProgressWindow != "" {
 		if _, err := time.ParseDuration(cfg.Commit.InProgressWindow); err != nil {
-			return nil, fmt.Errorf("invalid commit in_progress_window %q: %w", cfg.Commit.InProgressWindow, err)
+			return fmt.Errorf("invalid commit in_progress_window %q: %w", cfg.Commit.InProgressWindow, err)
 		}
 	}
 
@@ -260,7 +458,7 @@ func Parse(path string) (*Config, error) {
 		cfg.Commit.Strategy = "deterministic"
 	}
 	if cfg.Commit.Strategy != "deterministic" && cfg.Commit.Strategy != "model" && cfg.Commit.Strategy != "agent" {
-		return nil, fmt.Errorf("invalid commit strategy %q: must be deterministic, model, or agent", cfg.Commit.Strategy)
+		return fmt.Errorf("invalid commit strategy %q: must be deterministic, model, or agent", cfg.Commit.Strategy)
 	}
 	// "model" and "agent" with no model command have nothing to consult;
 	// behave exactly like the deterministic strategy.
@@ -268,5 +466,5 @@ func Parse(path string) (*Config, error) {
 		cfg.Commit.Strategy = "deterministic"
 	}
 
-	return &cfg, nil
+	return nil
 }
