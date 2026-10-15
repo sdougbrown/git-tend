@@ -261,8 +261,8 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 	go func() {
 		defer stdin.Close()
-		if err := writeAgentContext(stdin, repoPath, cfg.SyncBranch, rec, stuck); err != nil {
-			fmt.Fprintf(os.Stderr, "agent unstick: writing context: %v\n", err)
+		if err := writeAgentContext(stdin, repoPath, cfg.SyncBranch, rec, stuck); err != nil && logger != nil {
+			logger.Warn("agent unstick: writing context", "error", err)
 		}
 	}()
 

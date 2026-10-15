@@ -103,7 +103,7 @@ REPO                                     MODE STATE    LAST SYNC    AHEAD      B
 /Users/you/.dotfiles                     ro   ok       12s ago      0          0
 ```
 
-State is `pending`, `ok`, `stuck`, `offline`, or `snoozed`. A stuck repo with the agent feature enabled shows the attempt budget, e.g. `stuck (agent pending, attempts 1/2)` while attempts remain or `stuck (agent exhausted, attempts 2/2)` once the cap is reached and a human must intervene. `pending` means the daemon has discovered the repo but hasn't synced it yet (you'll see this briefly after `git-tend install`, `restart`, or `reload`). Mode is `ro` (read-only) or `rw` (read-write).
+State is `pending`, `ok`, `stuck`, `offline`, or `snoozed`. A stuck repo with the agent feature enabled shows the attempt budget on an indented line below the repo's row: `agent pending, attempts 1/2` while attempts remain or `agent exhausted, attempts 2/2` once the cap is reached and a human must intervene. `pending` means the daemon has discovered the repo but hasn't synced it yet (you'll see this briefly after `git-tend install`, `restart`, or `reload`). Mode is `ro` (read-only) or `rw` (read-write).
 
 **Step 3: If a repo goes stuck, see why.**
 
@@ -492,7 +492,7 @@ on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below 
 - **Exit 0** → the daemon removes the `.gittend.stuck` flag and logs the recovery; the next tick syncs normally. The attempt counter is kept.
 - **Non-zero exit or timeout** → the stuck flag stays and the attempt counter increments. The agent is retried on a later tick until `max_attempts` is reached for the repo.
 - The budget is per repo, not per stuck episode: it resets only when a sync actually succeeds or a human runs `git-tend unstick`. An agent exit 0 alone doesn't reset it — if the agent clears the flag without actually fixing the repo, the next failed sync can't re-arm a full budget. This is what makes "permanently stuck until a human (or a real fix)" hold.
-- `status` shows the state: `stuck (agent pending, attempts 1/2)` or `stuck (agent exhausted, attempts 2/2)`.
+- `status` shows the attempt budget on an indented line below the repo's row: `agent pending, attempts 1/2` while attempts remain, `agent exhausted, attempts 2/2` once the cap is reached.
 
 ### Safety notes
 
