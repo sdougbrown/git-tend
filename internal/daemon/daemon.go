@@ -397,9 +397,12 @@ func (d *Daemon) readSnooze(repoPath string) time.Time {
 }
 
 // maybeRunAgent invokes the repo's configured agent unstick hook, if any, and
-// records the attempt state for status display. It runs outside d.mu and can
-// take up to the agent timeout; the stuck flag keeps concurrent syncs from
-// touching the repo while it runs.
+// records the attempt state for status display. The agent run happens in a
+// goroutine so the serial per-repo tick loop is not blocked for up to the
+// agent timeout; the per-repo agent flock refuses a second concurrent run on
+// a later tick (it returns immediately with Ran=false), so at most one run
+// per repo is ever in flight. The status update and the status-file write
+// happen in the goroutine when the run completes, under d.mu.
 func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 	if repo.Config == nil || !repo.Config.Agent.Enabled() {
 		// The agent is no longer configured: clear any budget a previous tick
@@ -418,20 +421,24 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 		d.mu.Unlock()
 		return
 	}
-	res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
-	d.mu.Lock()
-	rs := d.repoStatus[repo.Path]
-	// Bump UpdatedAt when the budget actually changed: on a repeat stuck tick
-	// the state is already "stuck", so tick doesn't bump, and without this
-	// the merge in writeStatus keeps the stale on-disk budget (the display
-	// freezes at 1/2 and "agent exhausted" never shows).
-	if rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts {
-		rs.AgentAttempts = res.Attempts
-		rs.AgentMaxAttempts = res.MaxAttempts
-		rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	}
-	d.repoStatus[repo.Path] = rs
-	d.mu.Unlock()
+	go func() {
+		res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
+		d.mu.Lock()
+		rs := d.repoStatus[repo.Path]
+		// Bump UpdatedAt when the budget actually changed: on a repeat stuck
+		// tick the state is already "stuck", so tick doesn't bump, and
+		// without this the merge in writeStatus keeps the stale on-disk
+		// budget (the display freezes at 1/2 and "agent exhausted" never
+		// shows).
+		if rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts {
+			rs.AgentAttempts = res.Attempts
+			rs.AgentMaxAttempts = res.MaxAttempts
+			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		d.repoStatus[repo.Path] = rs
+		d.mu.Unlock()
+		d.writeStatus()
+	}()
 }
 
 func (d *Daemon) maybeNotify(repoPath string, prior, current string, cfg *config.Config, reason string) {

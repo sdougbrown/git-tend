@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/status"
@@ -124,9 +125,10 @@ func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Tick 1: sync fails at the hook, repo goes stuck, the agent runs and
-	// fails, and status shows the spent attempt.
+	// Tick 1: sync fails at the hook, repo goes stuck, and the agent starts
+	// (asynchronously) and fails.
 	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 1)
 
 	sf := status.Read(filepath.Join(stateDir, "status.json"))
 	if sf == nil {
@@ -181,14 +183,32 @@ func countMarkerRuns(marker string) int {
 	return len(strings.Split(strings.TrimRight(string(data), "\n"), "\n"))
 }
 
+// waitAgentBudget polls the on-disk status until the repo's agent budget
+// reaches at least wantAttempts. The agent run is asynchronous: its status
+// update lands via the run's own writeStatus, after the tick has returned.
+func waitAgentBudget(t *testing.T, stateDir, repoDir string, wantAttempts int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if sf := status.Read(filepath.Join(stateDir, "status.json")); sf != nil {
+			if got := sf.Repos[repoDir].AgentAttempts; got >= wantAttempts {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for agent budget >= %d on disk", wantAttempts)
+}
+
 func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
 	repoDir, _, _, stateDir, d := setupStuckAgentRepo(t)
 
 	ctx := context.Background()
 
-	// Tick 1: the hook fails, the repo goes stuck, the agent runs and fails,
-	// and status shows the spent attempt.
+	// Tick 1: the hook fails, the repo goes stuck, and the agent starts
+	// (asynchronously) and fails.
 	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 1)
 
 	sf := status.Read(filepath.Join(stateDir, "status.json"))
 	if sf == nil {
@@ -232,9 +252,10 @@ func TestDaemonTickAgentBudgetReachesCapOnDisk(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Tick 1: the hook fails, the repo goes stuck, the agent runs and fails;
-	// status shows the spent attempt.
+	// Tick 1: the hook fails, the repo goes stuck, and the agent starts
+	// (asynchronously) and fails.
 	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 1)
 
 	sf := status.Read(filepath.Join(stateDir, "status.json"))
 	if sf == nil {
@@ -252,6 +273,7 @@ func TestDaemonTickAgentBudgetReachesCapOnDisk(t *testing.T) {
 	// fails. The 1/2 -> 2/2 transition must reach the on-disk status, or the
 	// display freezes at 1/2 and "agent exhausted" never shows.
 	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 2)
 
 	sf2 := status.Read(filepath.Join(stateDir, "status.json"))
 	rs2 := sf2.Repos[repoDir]
@@ -261,6 +283,83 @@ func TestDaemonTickAgentBudgetReachesCapOnDisk(t *testing.T) {
 	if rs2.AgentAttempts != 2 || rs2.AgentMaxAttempts != 2 {
 		t.Errorf("tick 2: agent budget on disk = %d/%d, want 2/2", rs2.AgentAttempts, rs2.AgentMaxAttempts)
 	}
+}
+
+// The agent run must not block the serial per-repo tick loop: the tick that
+// starts a slow agent command returns promptly, and a later tick for a
+// different repo proceeds without waiting for the agent.
+func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
+	tempRoot := t.TempDir()
+	remote := setupBareRemote(t)
+
+	// agent-repo: read-write with a failing pre-commit hook and a slow
+	// agent (sleep 2, then exit 1).
+	agentRepo := filepath.Join(tempRoot, "agent-repo")
+	initRepoWithRemote(t, agentRepo, remote, "read-write", "0s", "work.txt")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"sleep 2; echo ran >> %s; exit 1\"\n", marker)
+	if err := os.WriteFile(filepath.Join(agentRepo, ".gittend"), []byte(agentCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, agentRepo, "add", ".gittend")
+	testGitOK(t, agentRepo, "commit", "-m", "agent config")
+	testGitOK(t, agentRepo, "push", "-u", "origin", "main")
+
+	hookPath := filepath.Join(agentRepo, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// other-repo: a healthy read-write repo that must not be delayed by the
+	// agent run. Its own bare remote: both repos push to main.
+	otherRepo := filepath.Join(tempRoot, "other-repo")
+	initRepoWithRemote(t, otherRepo, setupBareRemote(t), "read-write", "0s", "")
+
+	cfg := &config.UserConfig{
+		Roots:          []string{tempRoot},
+		Interval:       "1s",
+		ScanDepth:      2,
+		NetworkTimeout: "5s",
+	}
+	stateDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d.rescanRoots()
+
+	if len(d.repos) != 2 {
+		t.Fatalf("expected 2 repos after rescan, got %d", len(d.repos))
+	}
+
+	ctx := context.Background()
+
+	// Tick 1: agent-repo goes stuck and starts the slow agent. The tick must
+	// return well before the agent's 2s sleep.
+	start := time.Now()
+	d.tick(ctx)
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("tick 1 took %v, want < 1.5s (the agent run must not block the tick)", elapsed)
+	}
+
+	// Tick 2, while the agent is still running: other-repo syncs and the
+	// tick returns promptly. The repeat agent run is refused by the per-repo
+	// flock and returns immediately.
+	start = time.Now()
+	d.tick(ctx)
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("tick 2 took %v, want < 1.5s (the in-flight agent must not delay other repos)", elapsed)
+	}
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	if rs := sf.Repos[otherRepo]; rs.CurrentState != "ok" {
+		t.Errorf("other repo state = %s (%s), want ok", rs.CurrentState, rs.LastError)
+	}
+
+	// The slow agent's budget lands on disk once it finishes.
+	waitAgentBudget(t, stateDir, agentRepo, 1)
 }
 
 func TestPIDRefusal(t *testing.T) {

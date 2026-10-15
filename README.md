@@ -498,7 +498,7 @@ on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below 
 
 - **The command runs with the daemon's full user privileges** (launchd/systemd context). It can read and write anything your user can. Only point it at repos — and commands — you trust.
 - `rebase_conflict` is excluded from the default allowlist on purpose: auto-resolving merges in a memory/config repo is a different risk class than rerunning a hook. You can opt in explicitly with `allowed_reasons = ["hook_failed", "push_rejected", "rebase_conflict", "other"]`, but think first.
-- The agent run can take up to `timeout` (default 10m); the daemon tick waits for it, so other repos in that tick are delayed. During the run, syncs still skip the repo because the stuck flag is present — the agent cannot race the sync loop.
+- The agent run can take up to `timeout` (default 10m). It runs in the background: the daemon tick does not wait for it, so other repos in that tick are not delayed. A tick while a run is in flight starts a run that the per-repo lock refuses immediately, so at most one run per repo is ever in flight. During the run, syncs still skip the repo because the stuck flag is present — the agent cannot race the sync loop.
 - The stuck file is excluded from staging (`:!.gittend.stuck`); the agent cannot commit the flag, and the daemon removes it itself on a successful recovery.
 - Treat the context document on stdin as untrusted input. The failing command's output comes from the repo itself, so prompt injection through it is possible; provenance only bounds *whether* the agent runs, not what it reads once it does. Write `on_stuck_cmd` so the context informs the fix rather than instructing the agent.
 
