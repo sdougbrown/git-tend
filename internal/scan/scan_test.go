@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,11 +19,25 @@ func makeRepo(t *testing.T, dir, gittendContent string) {
 	}
 }
 
+func cfgFor(t *testing.T, root string, depth int, repos string) *config.UserConfig {
+	t.Helper()
+	data := fmt.Sprintf("roots = [%q]\nscan_depth = %d\n%s", root, depth, repos)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ParseUserConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
 func TestScanRoots(t *testing.T) {
 	root := t.TempDir()
 	makeRepo(t, filepath.Join(root, "my-repo"), "mode = \"read-write\"\n")
 
-	repos := ScanRoots(cfgFor(root, 3))
+	repos := ScanRoots(cfgFor(t, root, 3, ""))
 	if len(repos) != 1 {
 		t.Fatalf("expected 1 repo, got %d", len(repos))
 	}
@@ -35,7 +50,7 @@ func TestScanIgnoresHiddenDirs(t *testing.T) {
 	root := t.TempDir()
 	makeRepo(t, filepath.Join(root, ".hidden-dir"), "mode = \"read-only\"\n")
 
-	repos := ScanRoots(cfgFor(root, 3))
+	repos := ScanRoots(cfgFor(t, root, 3, ""))
 	if len(repos) != 0 {
 		t.Fatalf("expected 0 repos, got %d", len(repos))
 	}
@@ -50,7 +65,7 @@ func TestScanRespectsDepthLimit(t *testing.T) {
 	deepDir := filepath.Join(root, "a", "b", "c", "d", "deep-repo")
 	makeRepo(t, deepDir, "mode = \"read-only\"\n")
 
-	repos := ScanRoots(cfgFor(root, 2))
+	repos := ScanRoots(cfgFor(t, root, 2, ""))
 	if len(repos) != 1 {
 		t.Fatalf("expected 1 repo (shallow only), got %d", len(repos))
 	}
@@ -63,7 +78,7 @@ func TestScanSkipsExcludedNames(t *testing.T) {
 	root := t.TempDir()
 	makeRepo(t, filepath.Join(root, "node_modules"), "mode = \"read-only\"\n")
 
-	repos := ScanRoots(cfgFor(root, 3))
+	repos := ScanRoots(cfgFor(t, root, 3, ""))
 	if len(repos) != 0 {
 		t.Fatalf("expected 0 repos (node_modules excluded), got %d", len(repos))
 	}
@@ -80,7 +95,7 @@ func TestScanSkipsDotGitDirs(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(repoDir, ".git", "subdir", ".gittend"), []byte("mode = \"read-only\"\n"), 0644)
 
-	repos := ScanRoots(cfgFor(root, 3))
+	repos := ScanRoots(cfgFor(t, root, 3, ""))
 	if len(repos) != 1 {
 		t.Fatalf("expected 1 repo (valid-repo only, .git subdirs skipped), got %d", len(repos))
 	}
@@ -89,10 +104,30 @@ func TestScanSkipsDotGitDirs(t *testing.T) {
 	}
 }
 
-func cfgFor(root string, depth int) *config.UserConfig {
-	return &config.UserConfig{
-		Roots:     []string{root},
-		ScanDepth: depth,
+func TestScanSkipsWorktrees(t *testing.T) {
+	root := t.TempDir()
+
+	// A worktree has a .git file, not a .git directory.
+	worktree := filepath.Join(root, "my-worktree")
+	if err := os.MkdirAll(worktree, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: /elsewhere\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".gittend"), []byte("mode = \"read-write\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repos := ScanRoots(cfgFor(t, root, 3, ""))
+	if len(repos) != 0 {
+		t.Fatalf("expected 0 repos (worktree not synced), got %d", len(repos))
+	}
+
+	// The same applies to a [[repo]] entry pointing at a worktree.
+	repos = ScanRoots(cfgFor(t, t.TempDir(), 3, fmt.Sprintf("[[repo]]\npath = %q\n", worktree)))
+	if len(repos) != 0 {
+		t.Fatalf("expected 0 repos (worktree entry skipped), got %d", len(repos))
 	}
 }
 
@@ -107,8 +142,7 @@ func TestScanUserEntryOptsInWithoutGittend(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "my-repo")
 	makeGitDir(t, repoDir)
 
-	cfg := cfgFor(t.TempDir(), 3) // root without the repo
-	cfg.Repos = []config.RepoEntry{{Path: repoDir}}
+	cfg := cfgFor(t, t.TempDir(), 3, fmt.Sprintf("[[repo]]\npath = %q\n", repoDir)) // root without the repo
 
 	repos := ScanRoots(cfg)
 	if len(repos) != 1 {
@@ -129,8 +163,7 @@ func TestScanUserEntryOutsideRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := cfgFor(t.TempDir(), 3) // root without the repo
-	cfg.Repos = []config.RepoEntry{{Path: repoDir, Config: config.Config{SyncBranch: "dev"}}}
+	cfg := cfgFor(t, t.TempDir(), 3, fmt.Sprintf("[[repo]]\npath = %q\nsync_branch = \"dev\"\n", repoDir)) // root without the repo
 
 	repos := ScanRoots(cfg)
 	if len(repos) != 1 {
@@ -146,14 +179,7 @@ func TestScanMergesUserEntryOverGittend(t *testing.T) {
 	repoDir := filepath.Join(root, "my-repo")
 	makeRepo(t, repoDir, "mode = \"read-write\"\ninterval = \"2m\"\n")
 
-	cfg := cfgFor(root, 3)
-	cfg.Repos = []config.RepoEntry{{
-		Path: repoDir,
-		Config: config.Config{
-			Interval:   "7m",
-			SyncBranch: "dev",
-		},
-	}}
+	cfg := cfgFor(t, root, 3, fmt.Sprintf("[[repo]]\npath = %q\ninterval = \"7m\"\nsync_branch = \"dev\"\n", repoDir))
 
 	repos := ScanRoots(cfg)
 	if len(repos) != 1 {
@@ -175,8 +201,7 @@ func TestScanMergesUserEntryOverGittend(t *testing.T) {
 func TestScanSkipsUserEntryForNonGitPath(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "not-a-repo")
 
-	cfg := cfgFor(t.TempDir(), 3)
-	cfg.Repos = []config.RepoEntry{{Path: missing}}
+	cfg := cfgFor(t, t.TempDir(), 3, fmt.Sprintf("[[repo]]\npath = %q\n", missing))
 
 	repos := ScanRoots(cfg)
 	if len(repos) != 0 {

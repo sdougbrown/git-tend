@@ -77,7 +77,7 @@ func loadRepo(path string, userCfg *config.UserConfig) (Repo, bool) {
 
 	cfg, err := config.Resolve(gittendPath, userCfg.EntryFor(path), path)
 	if err != nil {
-		warn("parsing .gittend in %s: %v", path, err)
+		warn("resolving config for %s: %v", path, err)
 		return Repo{}, false
 	}
 
@@ -85,10 +85,11 @@ func loadRepo(path string, userCfg *config.UserConfig) (Repo, bool) {
 }
 
 // isGitRepo reports whether path looks like a git repository: it contains a
-// .git entry, which is a directory for a normal repo or a file for a worktree.
+// .git directory. A .git file (a worktree) does not count, so worktrees are
+// never synced by the daemon.
 func isGitRepo(path string) bool {
-	_, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil && info.IsDir()
 }
 
 func walkRoot(root string, maxDepth int) []string {
