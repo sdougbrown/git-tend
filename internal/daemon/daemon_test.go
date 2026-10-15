@@ -754,9 +754,15 @@ func TestOfflineBackoff(t *testing.T) {
 func TestDaemonTickAgentDisabledMidRunKeepsBudgetCleared(t *testing.T) {
 	repoDir, marker, _, stateDir, d := setupStuckAgentRepo(t)
 
-	// A slow agent command so the run is verifiably in flight across ticks.
+	// The agent blocks until the release file exists (capped at 10s), so the
+	// run stays in flight across the disable and the following tick.
+	release := filepath.Join(t.TempDir(), "release")
 	cfg := d.repos[0].Config
-	cfg.Agent.OnStuckCmd = fmt.Sprintf("sleep 2; echo ran >> %s; exit 1", marker)
+	cfg.Agent.OnStuckCmd = fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; echo ran >> %s; exit 1", release, marker)
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
 
 	ctx := context.Background()
 
@@ -773,6 +779,11 @@ func TestDaemonTickAgentDisabledMidRunKeepsBudgetCleared(t *testing.T) {
 	// The next tick runs the disabled-agent clear path (0/0) while the run
 	// is still in flight.
 	d.tick(ctx)
+
+	// Only now let the agent finish, so the run was in flight for tick 2.
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Wait for the in-flight run's completion goroutine to apply (or skip)
 	// its result.
@@ -795,7 +806,11 @@ func TestDaemonAgentCompletionDoesNotResurrectRemovedRepo(t *testing.T) {
 	repoDir, marker, _, stateDir, d := setupStuckAgentRepo(t)
 
 	release := filepath.Join(t.TempDir(), "release")
-	d.repos[0].Config.Agent.OnStuckCmd = fmt.Sprintf("while [ ! -e %s ]; do sleep 0.05; done; echo ran >> %s; exit 1", release, marker)
+	d.repos[0].Config.Agent.OnStuckCmd = fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; echo ran >> %s; exit 1", release, marker)
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
 
 	d.tick(context.Background())
 	waitForAgentLockHeld(t, stateDir, repoDir)
