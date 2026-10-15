@@ -840,6 +840,60 @@ func TestDaemonAgentCompletionDoesNotResurrectRemovedRepo(t *testing.T) {
 	}
 }
 
+// A run that completes after a tick recovered the repo to ok must not rewrite
+// the budget the ok branch cleared.
+func TestDaemonAgentCompletionAfterOkKeepsBudgetCleared(t *testing.T) {
+	repoDir, _, hookPath, stateDir, d := setupStuckAgentRepo(t)
+
+	release := filepath.Join(t.TempDir(), "release")
+	d.repos[0].Config.Agent.OnStuckCmd = fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; exit 1", release)
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
+
+	ctx := context.Background()
+
+	d.tick(ctx)
+	waitForAgentLockHeld(t, stateDir, repoDir)
+
+	// Recover the repo while the agent is still in flight: the next tick
+	// syncs successfully and takes the ok branch.
+	if err := os.Remove(filepath.Join(repoDir, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	d.tick(ctx)
+
+	d.mu.Lock()
+	okState := d.repoStatus[repoDir].CurrentState
+	d.mu.Unlock()
+	if okState != "ok" {
+		t.Fatalf("state after recovery tick = %s, want ok", okState)
+	}
+
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	d.agentRuns.Wait()
+
+	d.mu.Lock()
+	rs := d.repoStatus[repoDir]
+	d.mu.Unlock()
+	if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+		t.Errorf("in-memory agent budget = %d/%d, want 0/0 after ok", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	if got := sf.Repos[repoDir]; got.AgentAttempts != 0 || got.AgentMaxAttempts != 0 {
+		t.Errorf("on-disk agent budget = %d/%d, want 0/0 after ok", got.AgentAttempts, got.AgentMaxAttempts)
+	}
+}
+
 // waitForAgentLockHeld blocks until the agent run holds the per-repo agent
 // lock, proven by a non-blocking flock probe failing on a separate fd.
 func waitForAgentLockHeld(t *testing.T, stateDir, repoPath string) {

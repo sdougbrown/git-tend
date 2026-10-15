@@ -61,14 +61,24 @@ func TestRunStatusAgentStates(t *testing.T) {
 		t.Errorf("exhausted block = %q, want it to contain agent exhausted, attempts 2/2", got)
 	}
 	// The agent detail must not break the column grid: the detail line's text
-	// starts at the fixed indent after the REPO (40) and MODE (4) columns —
-	// where the STATE column begins.
+	// starts where the STATE column begins, as given by the header row.
+	header := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "REPO") {
+			header = line
+			break
+		}
+	}
+	stateCol := strings.Index(header, "STATE")
+	if stateCol < 0 {
+		t.Fatalf("output = %q, want a REPO header row containing STATE", out)
+	}
 	lines := strings.Split(blocks["/repos/agent-pending"], "\n")
 	if len(lines) < 2 {
 		t.Fatalf("pending block = %q, want a row plus a detail line", blocks["/repos/agent-pending"])
 	}
-	if !strings.HasPrefix(lines[1], strings.Repeat(" ", 46)+"agent") {
-		t.Errorf("pending detail line = %q, want it to start at the grid indent (46 spaces) before 'agent'", lines[1])
+	if !strings.HasPrefix(lines[1], strings.Repeat(" ", stateCol)+"agent") {
+		t.Errorf("pending detail line = %q, want it to start at the STATE column (%d spaces) before 'agent'", lines[1], stateCol)
 	}
 	if got := blocks["/repos/plain-stuck"]; strings.Contains(got, "agent") {
 		t.Errorf("no-agent block = %q, want plain stuck (AgentMaxAttempts 0 guard)", got)

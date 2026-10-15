@@ -435,9 +435,11 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 		// the zero value back would resurrect it (rendered as "ok").
 		//
 		// Apply the result only when the run was engaged (MaxAttempts > 0 —
-		// a lock-refused run reports 0) and the agent is still enabled at
-		// completion: an operator who removed on_stuck_cmd mid-run must not
-		// have the clear path's 0/0 overwritten by the orphaned result.
+		// a lock-refused run reports 0), the agent is still enabled at
+		// completion, and the repo is still stuck. An operator who removed
+		// on_stuck_cmd mid-run must not have the clear path's 0/0 overwritten
+		// by the orphaned result, and a repo a tick has already recovered to
+		// ok had its budget cleared by that tick.
 		// Bump UpdatedAt when the budget actually changed: on a repeat
 		// stuck tick the state is already "stuck", so tick doesn't bump,
 		// and without this the merge in writeStatus keeps the stale
@@ -450,7 +452,7 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 				break
 			}
 		}
-		if tracked && engaged && res.MaxAttempts > 0 && (rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts) {
+		if tracked && engaged && rs.CurrentState == "stuck" && res.MaxAttempts > 0 && (rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts) {
 			rs.AgentAttempts = res.Attempts
 			rs.AgentMaxAttempts = res.MaxAttempts
 			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
