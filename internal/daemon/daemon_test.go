@@ -14,6 +14,7 @@ import (
 	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/status"
 	gitSync "github.com/sdougbrown/git-tend/internal/sync"
+	"golang.org/x/sys/unix"
 )
 
 func testGit(t *testing.T, dir string, args ...string) string {
@@ -648,5 +649,81 @@ func TestOfflineBackoff(t *testing.T) {
 
 	if off.consecutiveFailures != 3 {
 		t.Errorf("expected 3 consecutive failures in daemon state, got %d", off.consecutiveFailures)
+	}
+}
+
+// Disabling the agent while a run is in flight must leave the cleared budget
+// alone: the in-flight run's completion re-checks the live config under
+// d.mu and defers to the disable path, so the stale result never re-appears
+// as "agent pending" on a repo with no agent configured.
+func TestDaemonTickAgentDisabledMidRunKeepsBudgetCleared(t *testing.T) {
+	repoDir, marker, _, stateDir, d := setupStuckAgentRepo(t)
+
+	// A slow agent command so the run is verifiably in flight across ticks.
+	cfg := d.repos[0].Config
+	cfg.Agent.OnStuckCmd = fmt.Sprintf("sleep 2; echo ran >> %s; exit 1", marker)
+
+	ctx := context.Background()
+
+	// Tick 1: the repo goes stuck and the slow agent starts.
+	d.tick(ctx)
+
+	// Wait until the run holds the agent lock, then disable the agent while
+	// it is in flight.
+	waitForAgentLockHeld(t, stateDir, repoDir)
+	noAgentCfg := "mode = \"read-write\"\ndebounce = \"0s\"\n"
+	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(noAgentCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d.rescanRoots()
+
+	// The next tick runs the disabled-agent clear path (0/0) while the run
+	// is still in flight.
+	d.tick(ctx)
+
+	// Wait for the in-flight run to finish (the marker appears when the
+	// command completes).
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent run did not finish in time")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Let the completion goroutine apply (or skip) its result.
+	time.Sleep(200 * time.Millisecond)
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+		t.Errorf("agent budget after disable-mid-run = %d/%d, want 0/0 (the stale in-flight result must not re-appear)", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+}
+
+// waitForAgentLockHeld blocks until the agent run holds the per-repo agent
+// lock, proven by a non-blocking flock probe failing on a separate fd.
+func waitForAgentLockHeld(t *testing.T, stateDir, repoPath string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		probe, err := os.OpenFile(gitSync.AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = unix.Flock(int(probe.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		probe.Close()
+		if err != nil {
+			return // held: the probe failed
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent never acquired the lock")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
