@@ -61,6 +61,39 @@ func ExpandPath(path string) string {
 	return filepath.Clean(path)
 }
 
+// SamePath reports whether two paths refer to the same directory, after
+// tilde expansion, cleaning, and best-effort symlink resolution. Resolution
+// is attempted on each side independently, so a symlinked root (e.g. a
+// ~/Code symlink farm) still matches its real path; paths that do not exist
+// are compared as cleaned strings.
+func SamePath(a, b string) bool {
+	a = ExpandPath(a)
+	b = ExpandPath(b)
+	if a == b {
+		return true
+	}
+	resA, okA := resolve(a)
+	resB, okB := resolve(b)
+	if okA && okB {
+		return resA == resB
+	}
+	if okA {
+		return resA == b
+	}
+	if okB {
+		return a == resB
+	}
+	return false
+}
+
+func resolve(path string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path, false
+	}
+	return resolved, true
+}
+
 func appSupportDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "Application Support")
