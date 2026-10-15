@@ -60,10 +60,15 @@ func TestRunStatusAgentStates(t *testing.T) {
 	if got := blocks["/repos/agent-exhausted"]; !strings.Contains(got, "agent exhausted, attempts 2/2") {
 		t.Errorf("exhausted block = %q, want it to contain agent exhausted, attempts 2/2", got)
 	}
-	// The agent detail must not break the column grid: the STATE column of the
-	// row itself stays short.
-	if got := blocks["/repos/agent-pending"]; strings.Count(got, "\n") != 1 {
-		t.Errorf("pending block = %q, want exactly one detail line", got)
+	// The agent detail must not break the column grid: the detail line's text
+	// starts at the fixed indent after the REPO (40) and MODE (4) columns —
+	// where the STATE column begins.
+	lines := strings.Split(blocks["/repos/agent-pending"], "\n")
+	if len(lines) < 2 {
+		t.Fatalf("pending block = %q, want a row plus a detail line", blocks["/repos/agent-pending"])
+	}
+	if !strings.HasPrefix(lines[1], strings.Repeat(" ", 46)+"agent") {
+		t.Errorf("pending detail line = %q, want it to start at the grid indent (46 spaces) before 'agent'", lines[1])
 	}
 	if got := blocks["/repos/plain-stuck"]; strings.Contains(got, "agent") {
 		t.Errorf("no-agent block = %q, want plain stuck (AgentMaxAttempts 0 guard)", got)
