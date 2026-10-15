@@ -67,15 +67,9 @@ func ScanRoots(userCfg *config.UserConfig) []Repo {
 }
 
 // loadRepo resolves the effective config for the repo at path. The second
-// return is false when the repo has a .gittend that fails to parse.
+// return is false when the repo's config fails to resolve.
 func loadRepo(path string, userCfg *config.UserConfig) (Repo, bool) {
-	gittend := filepath.Join(path, ".gittend")
-	var gittendPath string
-	if _, err := os.Stat(gittend); err == nil {
-		gittendPath = gittend
-	}
-
-	cfg, err := config.Resolve(gittendPath, userCfg.EntryFor(path), path)
+	cfg, err := config.ResolveRepo(path, userCfg)
 	if err != nil {
 		warn("resolving config for %s: %v", path, err)
 		return Repo{}, false

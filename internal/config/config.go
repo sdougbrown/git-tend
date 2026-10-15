@@ -67,14 +67,16 @@ func ParseDuration(s string) (time.Duration, error) {
 }
 
 type UserConfig struct {
-	Roots             []string    `toml:"roots"`
-	Interval          string      `toml:"interval"`
-	LogLevel          string      `toml:"log_level"`
-	EscalateAfterDays int         `toml:"escalate_after_days"`
-	NetworkTimeout    string      `toml:"network_timeout"`
-	OfflineBackoffCap string      `toml:"offline_backoff_cap"`
-	ScanDepth         int         `toml:"scan_depth"`
-	Repos             []RepoEntry `toml:"repo"`
+	Roots             []string `toml:"roots"`
+	Interval          string   `toml:"interval"`
+	LogLevel          string   `toml:"log_level"`
+	EscalateAfterDays int      `toml:"escalate_after_days"`
+	NetworkTimeout    string   `toml:"network_timeout"`
+	OfflineBackoffCap string   `toml:"offline_backoff_cap"`
+	ScanDepth         int      `toml:"scan_depth"`
+	// Populated from the raw [[repo]] tables after unmarshalling so entries
+	// keep their per-key merge shape (see ParseUserConfig).
+	Repos []RepoEntry `toml:"-"`
 }
 
 // EntryFor returns the user-level entry for the repo at path, or nil when no
@@ -196,6 +198,18 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 	entries, err = normalizeRepoEntries(entries)
 	if err != nil {
 		return nil, err
+	}
+	// Validate each entry now so a bad value fails the user-config parse —
+	// the daemon keeps its previous config on SIGHUP — instead of silently
+	// dropping the repo at scan time.
+	for i := range entries {
+		var probe Config
+		if err := overlayEntry(&probe, &entries[i], entries[i].Path); err != nil {
+			return nil, err
+		}
+		if err := finalizeConfig(&probe); err != nil {
+			return nil, fmt.Errorf("invalid user repo entry for %s: %w", entries[i].Path, err)
+		}
 	}
 	cfg.Repos = entries
 
@@ -367,15 +381,9 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 		}
 	}
 
-	if entry != nil && len(entry.Raw) > 0 {
-		data, err := toml.Marshal(entry.Raw)
-		if err != nil {
-			return nil, fmt.Errorf("encoding user repo entry for %s: %w", repoPath, err)
-		}
-		// Unmarshalling onto the populated struct leaves keys absent from the
-		// entry untouched, including inside sub-tables like [commit].
-		if err := toml.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("invalid user repo entry for %s: %w", repoPath, err)
+	if entry != nil {
+		if err := overlayEntry(&cfg, entry, repoPath); err != nil {
+			return nil, err
 		}
 	}
 
@@ -383,6 +391,46 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// overlayEntry applies an entry's raw table to cfg: keys present in the
+// entry win, keys left out keep their current value.
+func overlayEntry(cfg *Config, entry *RepoEntry, repoPath string) error {
+	if len(entry.Raw) == 0 {
+		return nil
+	}
+	data, err := toml.Marshal(entry.Raw)
+	if err != nil {
+		return fmt.Errorf("encoding user repo entry for %s: %w", repoPath, err)
+	}
+	// Unmarshalling onto the populated struct leaves keys absent from the
+	// entry untouched, including inside sub-tables like [commit].
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("invalid user repo entry for %s: %w", repoPath, err)
+	}
+	return nil
+}
+
+// ErrNotOptedIn reports that a repo is opted in by neither a .gittend file
+// nor a matching [[repo]] entry in the user config.
+var ErrNotOptedIn = errors.New("no .gittend config and no matching [[repo]] entry in the user config")
+
+// ResolveRepo resolves the effective per-repo config for the repo at
+// repoPath from the two opt-in sources: the repo's .gittend file (if any)
+// and the matching user-level [[repo]] entry (if any). It fails with an
+// error wrapping ErrNotOptedIn when neither source is present.
+func ResolveRepo(repoPath string, userCfg *UserConfig) (*Config, error) {
+	gittend := filepath.Join(repoPath, ".gittend")
+	var gittendPath string
+	if _, err := os.Stat(gittend); err == nil {
+		gittendPath = gittend
+	}
+
+	entry := userCfg.EntryFor(repoPath)
+	if gittendPath == "" && entry == nil {
+		return nil, fmt.Errorf("%s: %w", repoPath, ErrNotOptedIn)
+	}
+	return Resolve(gittendPath, entry, repoPath)
 }
 
 // parseRepoConfig decodes a .gittend, zeroing user-only keys so the decoded

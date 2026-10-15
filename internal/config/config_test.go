@@ -363,10 +363,16 @@ func TestResolveInvalidGittendValue(t *testing.T) {
 	}
 }
 
-func TestResolveInvalidUserEntryValue(t *testing.T) {
-	entry := entryFrom(t, "mode = \"bogus\"\n")
-	if _, err := Resolve("", entry, "/tmp/repo"); err == nil {
-		t.Error("expected error for invalid user-level mode")
+func TestParseUserConfigRejectsInvalidEntryValue(t *testing.T) {
+	// A bad value in an entry fails the user-config parse, not the later
+	// per-repo resolve.
+	_, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\nmode = \"bogus\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "/tmp/repo") || !strings.Contains(err.Error(), "invalid mode") {
+		t.Errorf("expected entry-path error for invalid mode, got: %v", err)
+	}
+	_, err = ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\ndebounce = \"bogus\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "/tmp/repo") || !strings.Contains(err.Error(), "debounce") {
+		t.Errorf("expected entry-path error for invalid debounce, got: %v", err)
 	}
 }
 

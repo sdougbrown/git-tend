@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -30,24 +29,12 @@ by a .gittend config or a [[repo]] entry in the user config.`,
 
 func runRepo(cmd *cobra.Command, args []string) error {
 	repoPath := paths.ExpandPath(args[0])
-	gittend := filepath.Join(repoPath, ".gittend")
 
 	userCfg, err := config.ParseUserConfig(filepath.Join(paths.ConfigDir(), "config.toml"))
 	if err != nil {
 		return fmt.Errorf("loading user config: %w", err)
 	}
-	entry := userCfg.EntryFor(repoPath)
-
-	_, statErr := os.Stat(gittend)
-	var gittendPath string
-	if statErr == nil {
-		gittendPath = gittend
-	}
-	if gittendPath == "" && entry == nil {
-		return fmt.Errorf("no .gittend config in %s and no matching [[repo]] entry in the user config", repoPath)
-	}
-
-	cfg, err := config.Resolve(gittendPath, entry, repoPath)
+	cfg, err := config.ResolveRepo(repoPath, userCfg)
 	if err != nil {
 		return fmt.Errorf("parsing config: %w", err)
 	}
