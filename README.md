@@ -314,25 +314,10 @@ paths = ["secrets/", "*.log"]
 on_stuck = false
 on_recovered = false
 
-[agent]
-# Optional: shell command that attempts to diagnose and clear a stuck repo
-# automatically. See "Agent-assisted unstick" below for semantics and safety
-# notes. Leave unset (default) to keep unstick manual-only.
-on_stuck_cmd = ""
-
-# Stuck reasons that may trigger the agent. Default: everything except
-# rebase_conflict (auto-resolving merges is a different risk class than
-# rerunning a hook). Valid values: hook_failed, push_rejected,
-# rebase_conflict, other.
-allowed_reasons = ["hook_failed", "push_rejected", "other"]
-
-# Maximum agent runs before the repo stays stuck for a human. The counter is
-# per repo: it resets when a sync succeeds or when 'git-tend unstick' runs,
-# not when the agent merely exits 0.
-max_attempts = 2
-
-# Hard kill for the agent run.
-timeout = "10m"
+# The [agent] section (agent-assisted unstick) is USER-LEVEL ONLY: it is read
+# from a [[repo]] entry in the daemon's user config, never from this file.
+# A [agent] table here is ignored with a warning. See "Agent-assisted
+# unstick" and "Central per-repo config" below.
 ```
 
 ### Central per-repo config (`[[repo]]` in the user config)
@@ -392,6 +377,11 @@ daemon execute a shell command are therefore honored only from `[[repo]]`
 entries in the user config:
 
 - `commit.model_cmd` — set it under `[repo.commit]` in the user config.
+- the whole `[agent]` section (agent-assisted unstick) — set it under
+  `[repo.agent]` in the user config. All four keys are user-level:
+  `on_stuck_cmd`, `allowed_reasons`, `max_attempts`, and `timeout`. The
+  repo must not choose the command, nor opt itself into riskier reasons,
+  nor raise its own attempt budget or timeout.
 
 If such a key is set in a repo's `.gittend`, git-tend logs a warning naming
 the repo and the key and ignores the value. Under `strategy = "model"` or
@@ -480,10 +470,33 @@ model_timeout = "2m"
 
 By default a stuck repo stays stuck until a human runs `git-tend unstick`. Repos can opt in to letting an agent run try to diagnose and clear the condition automatically for failure classes that are mechanically recoverable (a transient hook failure, a push rejected because the remote moved).
 
+The agent is configured per repo under `[repo.agent]` in the daemon's user config — never in the repo's `.gittend`:
+
 ```toml
-[agent]
+# In ~/.config/git-tend/config.toml
+[[repo]]
+path = "~/Code/my-repo"
+
+[repo.agent]
 on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below from stdin, diagnose the failure, fix it in place (e.g. rerun the failed git command), and exit 0 only if the repo can sync again. Do not force-push, rewrite history, or delete untracked work.'"
+
+# Stuck reasons that may trigger the agent. Default: everything except
+# rebase_conflict (auto-resolving merges is a different risk class than
+# rerunning a hook). Valid values: hook_failed, push_rejected,
+# rebase_conflict, other.
+allowed_reasons = ["hook_failed", "push_rejected", "other"]
+
+# Maximum agent runs before the repo stays stuck for a human. The counter is
+# per repo: it resets when a sync succeeds or when 'git-tend unstick' runs,
+# not when the agent merely exits 0.
+max_attempts = 2
+
+# Hard kill for the agent run.
+timeout = "10m"
 ```
+
+Leave `[repo.agent]` out (or just `on_stuck_cmd` unset) to keep unstick
+manual-only for that repo.
 
 ### Semantics
 
@@ -497,10 +510,11 @@ on_stuck_cmd = "pi -p --no-session 'A git repo is stuck. Read the context below 
 ### Safety notes
 
 - **The command runs with the daemon's full user privileges** (launchd/systemd context). It can read and write anything your user can. Only point it at repos — and commands — you trust.
+- The command — and everything that bounds it: the reason allowlist, the attempt budget, and the timeout — can only come from the user config. A repo cannot arm the agent, opt itself into `rebase_conflict`, or raise its own budget: a `[agent]` table in `.gittend` is ignored with a warning.
 - `rebase_conflict` is excluded from the default allowlist on purpose: auto-resolving merges in a memory/config repo is a different risk class than rerunning a hook. You can opt in explicitly with `allowed_reasons = ["hook_failed", "push_rejected", "rebase_conflict", "other"]`, but think first.
 - The agent run can take up to `timeout` (default 10m). It runs in the background: the daemon tick does not wait for it, so other repos in that tick are not delayed. A tick while a run is in flight starts a run that the per-repo lock refuses immediately, so at most one run per repo is ever in flight. During the run, syncs still skip the repo because the stuck flag is present — the agent cannot race the sync loop.
 - The stuck file is excluded from staging (`:!.gittend.stuck`); the agent cannot commit the flag, and the daemon removes it itself on a successful recovery.
-- Treat the context document on stdin as untrusted input. The failing command's output comes from the repo itself, so prompt injection through it is possible; provenance only bounds *whether* the agent runs, not what it reads once it does. Write `on_stuck_cmd` so the context informs the fix rather than instructing the agent.
+- Treat the context document on stdin as untrusted input. The failing command's output comes from the repo itself, so prompt injection through it is possible; provenance only bounds *whether* the agent runs, not what it reads once it does. Write `on_stuck_cmd` so the context informs the fix rather than instructing the agent. The stdin context is repo-influenced even though the command itself is not: only the choice of command is protected by the user-config gate, not the data the command consumes.
 
 ---
 
