@@ -319,10 +319,12 @@ on_recovered = false
 
 Per-repo settings can be set centrally in the user config, keyed by repo
 path. An entry opts the repo in even if it has no `.gittend` file, and is
-honored even if the repo lives outside the configured `roots`. Values set
-here override the repo's `.gittend` per key; keys left unset fall back to
-the repo's `.gittend`, then to built-in defaults. The daemon picks up
-changes on `SIGHUP`, like the rest of the user config.
+honored even if the repo lives outside the configured `roots`. A key set
+in the entry wins — even when its value is `false`, `0`, or an empty
+string; keys left out of the entry fall back to the repo's `.gittend`,
+then to built-in defaults. Merge is per key, so an entry's `[repo.commit]`
+table only replaces the commit keys it names. The daemon picks up changes
+on `SIGHUP`, like the rest of the user config.
 
 ```toml
 # In ~/.config/git-tend/config.toml

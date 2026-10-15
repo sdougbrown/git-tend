@@ -49,11 +49,14 @@ type NotifyConfig struct {
 }
 
 // RepoEntry is a user-level [[repo]] entry: per-repo settings set centrally
-// in the user config for the repo at Path. Config is embedded so entry keys
-// sit at the same level as path, with sub-tables like [repo.commit].
+// in the user config for the repo at Path. Keys sit at the same level as
+// path, with sub-tables like [repo.commit]. Raw holds the entry's TOML
+// table with path removed; Resolve overlays it onto the repo's .gittend
+// config, so only keys present in the entry take effect and keys left out
+// fall back to the .gittend. Entries built directly (Raw nil) set nothing.
 type RepoEntry struct {
-	Path string `toml:"path"`
-	Config
+	Path string         `toml:"path"`
+	Raw  map[string]any `toml:"-"`
 }
 
 func ParseDuration(s string) (time.Duration, error) {
@@ -173,7 +176,24 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 		cfg.ScanDepth = 4
 	}
 
-	entries, err := normalizeRepoEntries(cfg.Repos)
+	var raw struct {
+		Repos []any `toml:"repo"`
+	}
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing user config %s: %w", path, err)
+	}
+
+	entries := make([]RepoEntry, 0, len(raw.Repos))
+	for _, t := range raw.Repos {
+		table, ok := t.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("repo entry missing path")
+		}
+		p, _ := table["path"].(string)
+		delete(table, "path")
+		entries = append(entries, RepoEntry{Path: p, Raw: table})
+	}
+	entries, err = normalizeRepoEntries(entries)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +215,7 @@ func normalizeRepoEntries(entries []RepoEntry) ([]RepoEntry, error) {
 		merged := false
 		for i := range normalized {
 			if paths.SamePath(normalized[i].Path, entry.Path) {
-				mergeConfig(&normalized[i].Config, &entry.Config)
+				mergeRaw(normalized[i].Raw, entry.Raw)
 				merged = true
 				break
 			}
@@ -205,6 +225,20 @@ func normalizeRepoEntries(entries []RepoEntry) ([]RepoEntry, error) {
 		}
 	}
 	return normalized, nil
+}
+
+// mergeRaw overlays src onto dst: keys present in src win, nested tables are
+// merged per key, and other values (including arrays) replace dst's.
+func mergeRaw(dst, src map[string]any) {
+	for k, v := range src {
+		if dm, ok := dst[k].(map[string]any); ok {
+			if sm, ok := v.(map[string]any); ok {
+				mergeRaw(dm, sm)
+				continue
+			}
+		}
+		dst[k] = v
+	}
 }
 
 // WriteDefaultConfig writes a commented TOML template to path. If roots is
@@ -261,8 +295,8 @@ scan_depth = 4
 # Per-repo settings can be set centrally here instead of (or in addition to)
 # each repo's .gittend. An entry opts the repo in even if it has no .gittend
 # file, and works even if the repo lives outside the configured roots.
-# Values set here override the repo's .gittend per key; keys left unset here
-# fall back to the repo's .gittend.
+# A key set in the entry always wins — even when its value is false, 0, or an
+# empty string; keys left out of the entry fall back to the repo's .gittend.
 #
 # Command-executing keys (like commit.model_cmd below) are honored ONLY from
 # a [[repo]] entry here — the repo's .gittend cannot set them.
@@ -290,88 +324,54 @@ var warnf = func(format string, args ...interface{}) {
 // userOnlyKeys lists per-repo keys honored only from a user-config [[repo]]
 // entry: a .gittend value for any of these is ignored with a warning, since
 // the keys execute commands with the daemon's privileges and a repo writer
-// must not control them. To add another key, add an entry here and a
-// corresponding branch in mergeConfig.
+// must not control them. Each key is addressed by its path within a repo's
+// config table; to add another key, add one line here.
 var userOnlyKeys = []struct {
-	key   string
-	get   func(*Config) string
-	clear func(*Config)
+	key  string
+	path []string
 }{
-	{
-		key:   "commit.model_cmd",
-		get:   func(c *Config) string { return c.Commit.ModelCmd },
-		clear: func(c *Config) { c.Commit.ModelCmd = "" },
-	},
+	{key: "commit.model_cmd", path: []string{"commit", "model_cmd"}},
 }
 
-// warnUserOnlyKeys strips user-only keys from a .gittend-parsed config and
-// warns about each one that was set.
-func warnUserOnlyKeys(cfg *Config, repoPath string) {
+// stripUserOnlyKeys removes user-only keys from a .gittend's raw config
+// table, warning about each one that was set.
+func stripUserOnlyKeys(raw map[string]any, repoPath string) {
 	for _, k := range userOnlyKeys {
-		if k.get(cfg) == "" {
+		if !rawHasKey(raw, k.path) {
 			continue
 		}
 		warnf("%s: ignoring %s from .gittend; set it in a [[repo]] entry of the user config instead", repoPath, k.key)
-		k.clear(cfg)
+		deleteRawKey(raw, k.path)
 	}
 }
 
-// mergeConfig overlays src onto dst per key. Zero values count as unset, so
-// only keys explicitly set in src take effect; note this means a user-level
-// false or 0 cannot clear a value set in .gittend.
-func mergeConfig(dst, src *Config) {
-	if src.Mode != "" {
-		dst.Mode = src.Mode
+func rawHasKey(raw map[string]any, path []string) bool {
+	m := raw
+	for _, p := range path[:len(path)-1] {
+		next, ok := m[p].(map[string]any)
+		if !ok {
+			return false
+		}
+		m = next
 	}
-	if src.SyncBranch != "" {
-		dst.SyncBranch = src.SyncBranch
+	_, ok := m[path[len(path)-1]]
+	return ok
+}
+
+func deleteRawKey(raw map[string]any, path []string) {
+	m := raw
+	for _, p := range path[:len(path)-1] {
+		next, ok := m[p].(map[string]any)
+		if !ok {
+			return
+		}
+		m = next
 	}
-	if src.Interval != "" {
-		dst.Interval = src.Interval
-	}
-	if src.Debounce != "" {
-		dst.Debounce = src.Debounce
-	}
-	if src.Commit.Strategy != "" {
-		dst.Commit.Strategy = src.Commit.Strategy
-	}
-	if src.Commit.Emoji != "" {
-		dst.Commit.Emoji = src.Commit.Emoji
-	}
-	if src.Commit.ModelCmd != "" {
-		dst.Commit.ModelCmd = src.Commit.ModelCmd
-	}
-	if src.Commit.ModelPrompt != "" {
-		dst.Commit.ModelPrompt = src.Commit.ModelPrompt
-	}
-	if src.Commit.ModelTimeout != "" {
-		dst.Commit.ModelTimeout = src.Commit.ModelTimeout
-	}
-	if src.Commit.FallbackThresh != 0 {
-		dst.Commit.FallbackThresh = src.Commit.FallbackThresh
-	}
-	if src.Commit.NoVerify {
-		dst.Commit.NoVerify = true
-	}
-	if src.Commit.InProgressWindow != "" {
-		dst.Commit.InProgressWindow = src.Commit.InProgressWindow
-	}
-	if len(src.Include.Paths) > 0 {
-		dst.Include.Paths = src.Include.Paths
-	}
-	if len(src.Exclude.Paths) > 0 {
-		dst.Exclude.Paths = src.Exclude.Paths
-	}
-	if src.Notify.OnStuck {
-		dst.Notify.OnStuck = true
-	}
-	if src.Notify.OnRecovered {
-		dst.Notify.OnRecovered = true
-	}
+	delete(m, path[len(path)-1])
 }
 
 // Resolve returns the effective per-repo config for the repo at repoPath:
-// the user-level [[repo]] entry (if any) merged per key over the repo's
+// the user-level [[repo]] entry (if any) overlaid per key on the repo's
 // .gittend (if any), with defaults and validation applied once to the merged
 // result. gittendPath may be empty when the repo has no .gittend file.
 func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, error) {
@@ -382,14 +382,22 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 		if err != nil {
 			return nil, fmt.Errorf("reading config file %s: %w", gittendPath, err)
 		}
-		if err := toml.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", gittendPath, err)
+		cfg, err = parseRepoConfig(data, gittendPath, repoPath)
+		if err != nil {
+			return nil, err
 		}
-		warnUserOnlyKeys(&cfg, repoPath)
 	}
 
-	if entry != nil {
-		mergeConfig(&cfg, &entry.Config)
+	if entry != nil && len(entry.Raw) > 0 {
+		data, err := toml.Marshal(entry.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("encoding user repo entry for %s: %w", repoPath, err)
+		}
+		// Unmarshalling onto the populated struct leaves keys absent from the
+		// entry untouched, including inside sub-tables like [commit].
+		if err := toml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid user repo entry for %s: %w", repoPath, err)
+		}
 	}
 
 	if err := finalizeConfig(&cfg); err != nil {
@@ -398,25 +406,24 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 	return &cfg, nil
 }
 
-// Parse reads and finalizes a standalone .gittend config. It does not
-// enforce the user-config-only restrictions on command-executing keys;
-// Resolve is the entry point that merges user-level entries and enforces
-// them.
-func Parse(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading config file %s: %w", path, err)
+// parseRepoConfig decodes a .gittend, dropping user-only keys first so the
+// decoded config can never pick one up.
+func parseRepoConfig(data []byte, gittendPath, repoPath string) (Config, error) {
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return Config{}, fmt.Errorf("parsing config %s: %w", gittendPath, err)
 	}
+	stripUserOnlyKeys(raw, repoPath)
 
+	data, err := toml.Marshal(raw)
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing config %s: %w", gittendPath, err)
+	}
 	var cfg Config
 	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+		return Config{}, fmt.Errorf("parsing config %s: %w", gittendPath, err)
 	}
-
-	if err := finalizeConfig(&cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return cfg, nil
 }
 
 // finalizeConfig applies built-in defaults and validation to a config.

@@ -18,6 +18,17 @@ func writeConfig(t *testing.T, content string) string {
 	return path
 }
 
+// entryFrom parses doc as the body of a [[repo]] entry for /tmp/repo;
+// sub-table headers in doc must be spelled [repo.<name>].
+func entryFrom(t *testing.T, doc string) *RepoEntry {
+	t.Helper()
+	cfg, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\n"+doc))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return &cfg.Repos[0]
+}
+
 func TestParseInProgressWindow(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -38,7 +49,7 @@ func TestParseInProgressWindow(t *testing.T) {
 				b.WriteString("[commit]\n")
 				b.WriteString("in_progress_window = \"" + tt.window + "\"\n")
 			}
-			cfg, err := Parse(writeConfig(t, b.String()))
+			cfg, err := Resolve(writeConfig(t, b.String()), nil, "/tmp/repo")
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error for invalid in_progress_window")
@@ -84,10 +95,12 @@ func TestCommitStrategy(t *testing.T) {
 			if tt.strategy != "" {
 				b.WriteString("strategy = \"" + tt.strategy + "\"\n")
 			}
+			// model_cmd is a user-only key, so it comes from an entry.
+			var entry *RepoEntry
 			if tt.modelCmd != "" {
-				b.WriteString("model_cmd = \"" + tt.modelCmd + "\"\n")
+				entry = entryFrom(t, "[repo.commit]\nmodel_cmd = \""+tt.modelCmd+"\"\n")
 			}
-			cfg, err := Parse(writeConfig(t, b.String()))
+			cfg, err := Resolve(writeConfig(t, b.String()), entry, "/tmp/repo")
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error for invalid strategy")
@@ -108,7 +121,7 @@ func TestCommitStrategy(t *testing.T) {
 }
 
 func TestModelPromptParses(t *testing.T) {
-	cfg, err := Parse(writeConfig(t, "mode = \"read-only\"\n[commit]\nmodel_prompt = \"Summarize stdin.\"\n"))
+	cfg, err := Resolve(writeConfig(t, "mode = \"read-only\"\n[commit]\nmodel_prompt = \"Summarize stdin.\"\n"), nil, "/tmp/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +132,9 @@ func TestModelPromptParses(t *testing.T) {
 
 func TestParseStrategyDeterministicBackwardCompat(t *testing.T) {
 	// Existing configs that already spell out the value must keep parsing.
-	cfg, err := Parse(writeConfig(t, "mode = \"read-only\"\n[commit]\nstrategy = \"deterministic\"\nmodel_cmd = \"llm -m x 'write a commit message'\"\n"))
+	gittend := writeConfig(t, "mode = \"read-only\"\n[commit]\nstrategy = \"deterministic\"\n")
+	entry := entryFrom(t, "[repo.commit]\nmodel_cmd = \"llm -m x 'write a commit message'\"\n")
+	cfg, err := Resolve(gittend, entry, "/tmp/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -153,17 +168,25 @@ sync_branch = "dev"
 	if cfg.Repos[0].Path != filepath.Join(os.Getenv("HOME"), "Code", "one") {
 		t.Errorf("Path[0] = %q, want tilde-expanded", cfg.Repos[0].Path)
 	}
-	if cfg.Repos[0].Mode != "read-write" || cfg.Repos[0].Interval != "5m" {
-		t.Errorf("unexpected entry[0]: %+v", cfg.Repos[0].Config)
+	resolved, err := Resolve("", &cfg.Repos[0], cfg.Repos[0].Path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Repos[0].Commit.ModelCmd != "run-it" {
-		t.Errorf("ModelCmd = %q, want run-it", cfg.Repos[0].Commit.ModelCmd)
+	if resolved.Mode != "read-write" || resolved.Interval != "5m" {
+		t.Errorf("unexpected resolved entry[0]: %+v", resolved)
+	}
+	if resolved.Commit.ModelCmd != "run-it" {
+		t.Errorf("ModelCmd = %q, want run-it", resolved.Commit.ModelCmd)
 	}
 	if cfg.Repos[1].Path != filepath.Join(os.Getenv("HOME"), "Code", "two") {
 		t.Errorf("Path[1] = %q, want $HOME-expanded", cfg.Repos[1].Path)
 	}
-	if cfg.Repos[1].SyncBranch != "dev" {
-		t.Errorf("SyncBranch = %q, want dev", cfg.Repos[1].SyncBranch)
+	resolved, err = Resolve("", &cfg.Repos[1], cfg.Repos[1].Path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved.SyncBranch != "dev" {
+		t.Errorf("SyncBranch = %q, want dev", resolved.SyncBranch)
 	}
 }
 
@@ -194,26 +217,24 @@ mode = "read-only"
 		t.Fatalf("expected duplicate entries to collapse, got %d", len(cfg.Repos))
 	}
 	// Later entry wins per key; keys only it sets are kept.
-	if cfg.Repos[0].Mode != "read-only" {
-		t.Errorf("Mode = %q, want read-only (later entry)", cfg.Repos[0].Mode)
+	resolved, err := Resolve("", &cfg.Repos[0], "/tmp/repo-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Repos[0].Interval != "2m" {
-		t.Errorf("Interval = %q, want 2m (earlier entry kept)", cfg.Repos[0].Interval)
+	if resolved.Mode != "read-only" {
+		t.Errorf("Mode = %q, want read-only (later entry)", resolved.Mode)
 	}
-	if cfg.Repos[0].SyncBranch != "dev" {
-		t.Errorf("SyncBranch = %q, want dev", cfg.Repos[0].SyncBranch)
+	if resolved.Interval != "2m" {
+		t.Errorf("Interval = %q, want 2m (earlier entry kept)", resolved.Interval)
+	}
+	if resolved.SyncBranch != "dev" {
+		t.Errorf("SyncBranch = %q, want dev", resolved.SyncBranch)
 	}
 }
 
 func TestResolveMergePrecedence(t *testing.T) {
 	gittend := writeConfig(t, "mode = \"read-write\"\ninterval = \"2m\"\nsync_branch = \"main\"\n")
-	entry := &RepoEntry{
-		Config: Config{
-			Interval:   "7m",
-			Commit:     CommitConfig{Emoji: "🚀"},
-			SyncBranch: "", // unset at user level: falls back to .gittend
-		},
-	}
+	entry := entryFrom(t, "interval = \"7m\"\n[repo.commit]\nemoji = \"🚀\"\n")
 
 	cfg, err := Resolve(gittend, entry, "/tmp/repo")
 	if err != nil {
@@ -244,7 +265,7 @@ func TestResolveDefaultsApplyPostMerge(t *testing.T) {
 	// An unset user-level mode must not clobber the .gittend mode with the
 	// built-in default.
 	gittend := writeConfig(t, "mode = \"read-write\"\n")
-	entry := &RepoEntry{Config: Config{SyncBranch: "dev"}}
+	entry := entryFrom(t, "sync_branch = \"dev\"\n")
 
 	cfg, err := Resolve(gittend, entry, "/tmp/repo")
 	if err != nil {
@@ -260,7 +281,7 @@ func TestResolveDefaultsApplyPostMerge(t *testing.T) {
 
 func TestResolveEntryOnlyAppliesDefaults(t *testing.T) {
 	// A [[repo]] entry opts a repo in without any .gittend file.
-	cfg, err := Resolve("", &RepoEntry{Config: Config{Mode: "read-write"}}, "/tmp/repo")
+	cfg, err := Resolve("", entryFrom(t, "mode = \"read-write\"\n"), "/tmp/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -297,7 +318,7 @@ func TestResolveGittendModelCmdIgnoredWithWarning(t *testing.T) {
 
 func TestResolveUserEntryModelCmdHonored(t *testing.T) {
 	gittend := writeConfig(t, "[commit]\nstrategy = \"model\"\nmodel_cmd = \"from-gittend\"\n")
-	entry := &RepoEntry{Config: Config{Commit: CommitConfig{ModelCmd: "from-user"}}}
+	entry := entryFrom(t, "[repo.commit]\nmodel_cmd = \"from-user\"\n")
 
 	var warnings []string
 	origWarn := warnf
@@ -329,8 +350,66 @@ func TestResolveInvalidGittendValue(t *testing.T) {
 }
 
 func TestResolveInvalidUserEntryValue(t *testing.T) {
-	entry := &RepoEntry{Config: Config{Mode: "bogus"}}
+	entry := entryFrom(t, "mode = \"bogus\"\n")
 	if _, err := Resolve("", entry, "/tmp/repo"); err == nil {
 		t.Error("expected error for invalid user-level mode")
+	}
+}
+
+func TestResolveUserEntryNestedMergeKeepsGittendKeys(t *testing.T) {
+	// An entry's [repo.commit] table must not wipe sibling keys the .gittend
+	// set in the same table.
+	gittend := writeConfig(t, "mode = \"read-write\"\ninterval = \"2m\"\n[commit]\nstrategy = \"model\"\n")
+	entry := entryFrom(t, "[repo.commit]\nemoji = \"🚀\"\nmodel_cmd = \"user-cmd\"\n")
+
+	cfg, err := Resolve(gittend, entry, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Commit.Strategy != "model" {
+		t.Errorf("Strategy = %q, want model (from .gittend)", cfg.Commit.Strategy)
+	}
+	if cfg.Commit.Emoji != "🚀" {
+		t.Errorf("Emoji = %q, want 🚀 (from entry)", cfg.Commit.Emoji)
+	}
+	if cfg.Commit.ModelCmd != "user-cmd" {
+		t.Errorf("ModelCmd = %q, want user-cmd (from entry)", cfg.Commit.ModelCmd)
+	}
+	if cfg.Interval != "2m" {
+		t.Errorf("Interval = %q, want 2m (from .gittend)", cfg.Interval)
+	}
+}
+
+func TestResolveUserFalseClearsGittendValue(t *testing.T) {
+	gittend := writeConfig(t, "[commit]\nno_verify = true\n")
+	entry := entryFrom(t, "[repo.commit]\nno_verify = false\n")
+
+	cfg, err := Resolve(gittend, entry, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Commit.NoVerify {
+		t.Error("NoVerify = true, want false (user-level false clears .gittend)")
+	}
+}
+
+func TestResolveUserArrayReplacesGittend(t *testing.T) {
+	gittend := writeConfig(t, "[include]\npaths = [\"a\", \"b\"]\n")
+
+	cfg, err := Resolve(gittend, entryFrom(t, "[repo.include]\npaths = [\"c\"]\n"), "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Include.Paths) != 1 || cfg.Include.Paths[0] != "c" {
+		t.Errorf("Include.Paths = %v, want [c] (replaced wholesale)", cfg.Include.Paths)
+	}
+
+	// An entry that leaves the array out falls back to the .gittend value.
+	cfg, err = Resolve(gittend, entryFrom(t, "mode = \"read-only\"\n"), "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Include.Paths) != 2 || cfg.Include.Paths[0] != "a" || cfg.Include.Paths[1] != "b" {
+		t.Errorf("Include.Paths = %v, want [a b] (kept from .gittend)", cfg.Include.Paths)
 	}
 }
