@@ -168,7 +168,7 @@ func (d *Daemon) rescanRoots() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.repos = scan.ScanRoots(d.userCfg.Roots, d.userCfg.ScanDepth)
+	d.repos = scan.ScanRoots(d.userCfg)
 	d.stuckLogged = make(map[string]bool)
 
 	currentRepos := make(map[string]bool, len(d.repos))

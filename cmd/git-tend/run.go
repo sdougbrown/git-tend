@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -21,15 +22,32 @@ func init() {
 var runCmd = &cobra.Command{
 	Use:   "run [path]",
 	Short: "One-shot sync of a single repo",
-	Long:  `Run one sync cycle for the git repo at path. Path must contain a .gittend config.`,
-	Args:  cobra.ExactArgs(1),
-	RunE:  runRepo,
+	Long: `Run one sync cycle for the git repo at path. The repo must be opted in
+by a .gittend config or a [[repo]] entry in the user config.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRepo,
 }
 
 func runRepo(cmd *cobra.Command, args []string) error {
 	repoPath := paths.ExpandPath(args[0])
+	gittend := filepath.Join(repoPath, ".gittend")
 
-	cfg, err := config.Parse(filepath.Join(repoPath, ".gittend"))
+	userCfg, err := config.ParseUserConfig(filepath.Join(paths.ConfigDir(), "config.toml"))
+	if err != nil {
+		userCfg = &config.UserConfig{}
+	}
+	entry := userCfg.EntryFor(repoPath)
+
+	_, statErr := os.Stat(gittend)
+	var gittendPath string
+	if statErr == nil {
+		gittendPath = gittend
+	}
+	if gittendPath == "" && entry == nil {
+		return fmt.Errorf("no .gittend config in %s and no matching [[repo]] entry in the user config", repoPath)
+	}
+
+	cfg, err := config.Resolve(gittendPath, entry, repoPath)
 	if err != nil {
 		return fmt.Errorf("parsing config: %w", err)
 	}
