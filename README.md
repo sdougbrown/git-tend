@@ -214,13 +214,50 @@ emoji = "🐌"
 # whether or not this option is set.
 in_progress_window = "5m"
 
-# Commit strategy. Currently only the default (heuristic) strategy is used.
-strategy = ""
+# Commit strategy. One of:
+#
+#   deterministic (default): heuristic message; model_cmd is consulted only
+#     when the heuristic produces a low-information message like
+#     "sync 14 files".
+#   model: model_cmd is always consulted, falling back to the heuristic on
+#     timeout, error, or empty output. Requires model_cmd — with model_cmd
+#     unset, strategy = "model" behaves exactly like "deterministic".
+strategy = "deterministic"
 
-# Optional: shell command that receives a full git diff on stdin and prints
-# a commit message on stdout. Used as a fallback only when the heuristic
-# produces a low-information message like "sync 14 files".
+# Optional: shell command that receives a diff on stdin and prints a commit
+# message on stdout. Under the default strategy it is used as a fallback only
+# when the heuristic produces a low-information message like "sync 14 files".
+#
+# What the command receives on stdin depends on model_prompt:
+#
+#   - model_prompt set (or strategy = "model"): the name-status diff
+#     ("git diff --cached --name-status" listing, status TAB path) followed
+#     by the prompt text.
+#   - model_prompt unset and strategy = "deterministic": the full diff
+#     ("git diff --cached"), unchanged from earlier versions. This keeps
+#     commands with their own inline prompt working as before.
 model_cmd = "llm -m gpt-4o-mini 'write a short git commit message for this diff'"
+
+# Optional: prompt appended to the name-status diff on the model's stdin.
+# When unset under strategy = "model", a built-in default prompt is used:
+#
+#   Stdin contains a git diff --cached --name-status listing (status TAB path).
+#   Write one short imperative git commit message, max 72 characters,
+#   summarizing these changes. Output only the message text itself.
+#
+# When unset under the default strategy, nothing is appended (see above).
+#
+# Prompt phrasing matters: name the stdin content explicitly. Prompts that
+# only say "the diff follows on stdin" routinely confuse small models — they
+# claim they can't see the input. The built-in default prompt works because
+# it says what stdin holds and exactly what to output.
+#
+# The configured commit emoji is applied by git-tend itself, not the model:
+# if the model's output already starts with any emoji, it is left as-is;
+# otherwise the configured emoji is prepended. Set model_prompt to override
+# the built-in default for repos needing different rigour (conventional
+# commits, multi-line bodies, etc.).
+# model_prompt = ""
 
 # Timeout for the model command. Default: 30s.
 model_timeout = "30s"
