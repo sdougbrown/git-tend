@@ -208,3 +208,30 @@ func TestScanSkipsUserEntryForNonGitPath(t *testing.T) {
 		t.Fatalf("expected 0 repos, got %d", len(repos))
 	}
 }
+
+func TestScanUserEntrySymlinkLoadedOnce(t *testing.T) {
+	// An entry pointing at a symlink to a repo under a root must not load the
+	// repo twice: the walk finds the real path, and SamePath resolves the
+	// entry's symlink to the same directory.
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "my-repo")
+	makeRepo(t, repoDir, "mode = \"read-write\"\n")
+	link := filepath.Join(t.TempDir(), "link-to-my-repo")
+	if err := os.Symlink(repoDir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := cfgFor(t, root, 3, fmt.Sprintf("[[repo]]\npath = %q\ninterval = \"7m\"\n", link))
+
+	repos := ScanRoots(cfg)
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 repo (symlink entry merged with walked repo), got %d", len(repos))
+	}
+	if repos[0].Path != repoDir {
+		t.Errorf("Path = %q, want walked real path %q", repos[0].Path, repoDir)
+	}
+	// The entry must be merged into the walked repo, not just skipped.
+	if repos[0].Config.Interval != "7m" || repos[0].Config.Mode != "read-write" {
+		t.Errorf("unexpected merged config: %+v", repos[0].Config)
+	}
+}
