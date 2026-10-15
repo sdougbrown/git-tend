@@ -2,7 +2,7 @@
 
 You work across a handful of git repos — notes, dotfiles, a side project, maybe a shared config directory. You want them to stay in sync with their remotes without thinking about it. You don't want to open a separate app or remember to run a script.
 
-git-tend is your git gardener: a background daemon that tends your repos while you work on other things. It watches a configured set of directory roots, finds repos that have opted in with a `.gittend` file, and syncs them on a regular interval. On macOS it runs as a launchd agent; on Linux as a systemd user service. When something goes wrong — a merge conflict, a push rejection, a commit hook failure — it stops touching that repo and tells you.
+git-tend is your git gardener: a background daemon that tends your repos while you work on other things. It watches a configured set of directory roots, finds repos that have opted in — with a `.gittend` file or a `[[repo]]` entry in the user config — and syncs them on a regular interval. On macOS it runs as a launchd agent; on Linux as a systemd user service. When something goes wrong — a merge conflict, a push rejection, a commit hook failure — it stops touching that repo and tells you.
 
 It does not touch repos you haven't opted in. It does not force-push or rewrite history. It does not run unless the daemon is running.
 
@@ -88,7 +88,7 @@ sync_branch = "main"
 emoji = "🐌"
 ```
 
-The `.gittend` file must be present for the daemon to touch the repo. Without it, the repo is ignored entirely.
+The `.gittend` file — or a `[[repo]]` entry in the user config — must be present for the daemon to touch the repo. With neither, the repo is ignored entirely.
 
 **Step 2: Check that the daemon found it.**
 
@@ -255,14 +255,14 @@ strategy = "deterministic"
 #   - strategy = "agent": repo path, branch, and the full capped diff
 #     followed by model_prompt (or a built-in default prompt).
 #
-# Worked example using pi as the message author:
-#
-#   model_cmd = "pi -p --no-session --no-tools"
+# Worked examples using pi or an LLM as the message author live under
+# "Central per-repo config" — model_cmd is a user-level key and cannot be
+# set here.
 #
 # Under the agent strategy the agent never runs git itself; it only prints
 # text that git-tend validates and commits. See the trust-model section.
 #
-model_cmd = "llm -m gpt-4o-mini 'write a short git commit message for this diff'"
+# model_cmd = "..."
 
 # Optional: prompt appended to the name-status diff on the model's stdin.
 # When unset under strategy = "model", a built-in default prompt is used:
@@ -320,11 +320,13 @@ on_recovered = false
 Per-repo settings can be set centrally in the user config, keyed by repo
 path. An entry opts the repo in even if it has no `.gittend` file, and is
 honored even if the repo lives outside the configured `roots`. A key set
-in the entry wins — even when its value is `false`, `0`, or an empty
-string; keys left out of the entry fall back to the repo's `.gittend`,
-then to built-in defaults. Merge is per key, so an entry's `[repo.commit]`
-table only replaces the commit keys it names. The daemon picks up changes
-on `SIGHUP`, like the rest of the user config.
+in the entry wins — even when its value is `false` or `0`; keys left out
+of the entry fall back to the repo's `.gittend`, then to built-in
+defaults. An empty string means the built-in default for keys that have
+one (e.g. `mode`, `sync_branch`, `emoji`, `strategy`). Merge is per key,
+so an entry's `[repo.commit]` table only replaces the commit keys it
+names. The daemon picks up changes on `SIGHUP`, like the rest of the user
+config.
 
 ```toml
 # In ~/.config/git-tend/config.toml
@@ -344,6 +346,25 @@ model_cmd = "pi -p --no-session --no-tools"
 on_stuck = true
 ```
 
+**Commit-message commands** — `commit.model_cmd` is a user-level key, so it
+can only appear under `[repo.commit]` here. Under `strategy = "model"`, an
+LLM as a fallback message author:
+
+```toml
+[repo.commit]
+strategy = "model"
+model_cmd = "llm -m gpt-4o-mini 'write a short git commit message for this diff'"
+```
+
+Under `strategy = "agent"`, pi as the commit-message author:
+
+```toml
+[repo.commit]
+strategy = "agent"
+model_cmd = "pi -p --no-session --no-tools"
+model_timeout = "2m"
+```
+
 **Trust boundary — command-executing keys are user-level only.** A
 `.gittend` file lives inside the repo, so anyone who can write to the repo
 (collaborators, a cloned third-party repo) can write it. Keys that make the
@@ -358,7 +379,8 @@ the repo and the key and ignores the value. Under `strategy = "model"` or
 the deterministic strategy.
 
 A `[[repo]]` path that doesn't exist or isn't a git repository is a warning,
-not an error.
+not an error. A `.gittend` that fails to parse makes the repo skipped even
+when a matching entry exists — parsing is fail-closed, and intended.
 
 ---
 
@@ -424,8 +446,9 @@ interleaving. (A user editing during the agent run is no worse off than with
 any slow commit: their later save lands in the next cycle.)
 
 ```toml
-# Example: pi as the commit-message author for a repo.
-[commit]
+# Example: pi as the commit-message author for a repo — set in the user
+# config, since model_cmd is user-level only.
+[repo.commit]
 strategy = "agent"
 model_cmd = "pi -p --no-session --no-tools"
 model_timeout = "2m"
@@ -453,7 +476,7 @@ model_timeout = "2m"
 | `git-tend prompt` | Print the prompt segment directly |
 | `git-tend daemon` | Run the daemon in the foreground (used by the service; not normally called directly) |
 
-`git-tend run` requires a `.gittend` file in the target repo. `git-tend unstick` validates that the path is a git repo before removing the flag.
+`git-tend run` requires the target repo to be opted in by a `.gittend` file or a matching `[[repo]]` entry in the user config. `git-tend unstick` validates that the path is a git repo before removing the flag.
 
 `git-tend snooze` writes to a `snoozes.json` file in the state directory. A snoozed repo shows as `snoozed` in `status` output and is skipped by the daemon until the duration expires. It does not remove the snooze from the file automatically — the state will simply be ignored once the timestamp passes.
 
@@ -461,7 +484,7 @@ model_timeout = "2m"
 
 ## What it does not do
 
-- It does not manage repos that don't have a `.gittend` file. Your repos are opt-in.
+- It does not manage repos that aren't opted in by a `.gittend` file or a `[[repo]]` entry in the user config. Your repos are opt-in.
 - It does not rewrite history or force-push.
 - It does not merge. In read-write mode it rebases (`git pull --rebase`) and stops if there's a conflict.
 - It does not support Windows.

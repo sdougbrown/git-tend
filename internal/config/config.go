@@ -309,8 +309,9 @@ scan_depth = 4
 # Per-repo settings can be set centrally here instead of (or in addition to)
 # each repo's .gittend. An entry opts the repo in even if it has no .gittend
 # file, and works even if the repo lives outside the configured roots.
-# A key set in the entry always wins — even when its value is false, 0, or an
-# empty string; keys left out of the entry fall back to the repo's .gittend.
+# A key set in the entry always wins — even when its value is false or 0;
+# an empty string means the built-in default for keys that have one. Keys
+# left out of the entry fall back to the repo's .gittend.
 #
 # Command-executing keys (like commit.model_cmd below) are honored ONLY from
 # a [[repo]] entry here — the repo's .gittend cannot set them.
