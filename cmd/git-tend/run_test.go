@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
 )
@@ -50,6 +53,82 @@ func setupRunRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return repo
+}
+
+// writeUserConfig writes a user config containing repos (TOML body) to a temp
+// XDG_CONFIG_HOME and points the process at it.
+func writeUserConfig(t *testing.T, repos string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "git-tend"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	data := "roots = []\n" + repos
+	if err := os.WriteFile(filepath.Join(dir, "git-tend", "config.toml"), []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunRepoEntryOnlyOptIn(t *testing.T) {
+	repo := setupRunRepo(t)
+	if err := os.Remove(filepath.Join(repo, ".gittend")); err != nil {
+		t.Fatal(err)
+	}
+	writeUserConfig(t, fmt.Sprintf("[[repo]]\npath = %q\nmode = \"read-write\"\n", repo))
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	t.Chdir(repo)
+	if err := runRepo(&cobra.Command{}, []string{"."}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// The entry's mode was honored: the manual change was committed and pushed.
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("manual change was not committed: %s", out)
+	}
+	head, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := exec.Command("git", "-C", repo, "ls-remote", "origin", "refs/heads/main").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(remote), strings.TrimSpace(string(head))) {
+		t.Errorf("manual change was not pushed: local HEAD %s, remote %s", head, remote)
+	}
+}
+
+func TestRunRepoRequiresOptIn(t *testing.T) {
+	repo := setupRunRepo(t)
+	if err := os.Remove(filepath.Join(repo, ".gittend")); err != nil {
+		t.Fatal(err)
+	}
+	writeUserConfig(t, "") // no [[repo]] entries
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	t.Chdir(repo)
+	err := runRepo(&cobra.Command{}, []string{"."})
+	if !errors.Is(err, config.ErrNotOptedIn) {
+		t.Errorf("expected ErrNotOptedIn, got: %v", err)
+	}
+}
+
+func TestRunRepoFailsOnMalformedUserConfig(t *testing.T) {
+	repo := setupRunRepo(t)
+	writeUserConfig(t, "[[repo]\n")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	t.Chdir(repo)
+	err := runRepo(&cobra.Command{}, []string{"."})
+	if err == nil || !strings.Contains(err.Error(), "loading user config") {
+		t.Errorf("expected user-config error, got: %v", err)
+	}
 }
 
 func TestRunAfterUnstickBypassesDebounceAndPreservesStatus(t *testing.T) {

@@ -25,19 +25,69 @@ var excludeNames = map[string]bool{
 	"__pycache__":  true,
 }
 
-func ScanRoots(roots []string, maxDepth int) []Repo {
+// ScanRoots discovers repos under the configured roots and from the user
+// config's [[repo]] entries, resolving each repo's effective config by
+// merging the matching user entry (if any) over its .gittend (if any).
+func ScanRoots(userCfg *config.UserConfig) []Repo {
 	var repos []Repo
+	var discovered []string
 
-	for _, root := range roots {
-		root = paths.ExpandPath(root)
-		repos = append(repos, walkRoot(root, maxDepth)...)
+	for _, root := range userCfg.Roots {
+		for _, path := range walkRoot(paths.ExpandPath(root), userCfg.ScanDepth) {
+			discovered = append(discovered, path)
+			if repo, ok := loadRepo(path, userCfg); ok {
+				repos = append(repos, repo)
+			}
+		}
+	}
+
+	// Entries opt repos in even without a .gittend file, and are honored even
+	// outside the configured roots.
+	for _, entry := range userCfg.Repos {
+		duplicate := false
+		for _, path := range discovered {
+			if paths.SamePath(path, entry.Path) {
+				duplicate = true // already loaded with its entry merged in
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		if !isGitRepo(entry.Path) {
+			warn("user config repo %s: not a git repo, skipping", entry.Path)
+			continue
+		}
+		if repo, ok := loadRepo(entry.Path, userCfg); ok {
+			repos = append(repos, repo)
+		}
 	}
 
 	return repos
 }
 
-func walkRoot(root string, maxDepth int) []Repo {
-	var repos []Repo
+// loadRepo resolves the effective config for the repo at path. The second
+// return is false when the repo's config fails to resolve.
+func loadRepo(path string, userCfg *config.UserConfig) (Repo, bool) {
+	cfg, err := config.ResolveRepo(path, userCfg)
+	if err != nil {
+		warn("resolving config for %s: %v", path, err)
+		return Repo{}, false
+	}
+
+	return Repo{Path: path, Config: cfg}, true
+}
+
+// isGitRepo reports whether path looks like a git repository: it contains a
+// .git directory. A .git file (a worktree) does not count, so worktrees are
+// never synced by the daemon.
+func isGitRepo(path string) bool {
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil && info.IsDir()
+}
+
+func walkRoot(root string, maxDepth int) []string {
+	var found []string
 
 	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -75,29 +125,19 @@ func walkRoot(root string, maxDepth int) []Repo {
 			return filepath.SkipDir
 		}
 
-		dotGit := filepath.Join(path, ".git")
-		gittend := filepath.Join(path, ".gittend")
-
-		gitInfo, gitErr := os.Stat(dotGit)
-		if gitErr != nil || !gitInfo.IsDir() {
+		if !isGitRepo(path) {
 			return nil
 		}
 
-		if _, err := os.Stat(gittend); err != nil {
+		if _, err := os.Stat(filepath.Join(path, ".gittend")); err != nil {
 			return nil
 		}
 
-		cfg, parseErr := config.Parse(gittend)
-		if parseErr != nil {
-			warn("parsing .gittend in %s: %v", path, parseErr)
-			return nil
-		}
-
-		repos = append(repos, Repo{Path: path, Config: cfg})
+		found = append(found, path)
 		return filepath.SkipDir
 	})
 
-	return repos
+	return found
 }
 
 func warn(format string, args ...interface{}) {
