@@ -362,12 +362,15 @@ func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
 	remote := setupBareRemote(t)
 
 	// agent-repo: read-write with a failing pre-commit hook and a slow
-	// agent (sleep 2, then exit 1).
+	// agent that blocks until the release file exists (capped at 10s), then
+	// exits 1.
 	agentRepo := filepath.Join(tempRoot, "agent-repo")
 	initRepoWithRemote(t, agentRepo, remote, "read-write", "0s", "work.txt")
 
 	marker := filepath.Join(t.TempDir(), "marker")
-	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"sleep 2; echo ran >> %s; exit 1\"\n", marker)
+	release := filepath.Join(t.TempDir(), "release")
+	slowAgent := fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; echo ran >> %s; exit 1", release, marker)
+	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = %q\n", slowAgent)
 	if err := os.WriteFile(filepath.Join(agentRepo, ".gittend"), []byte(agentCfg), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +394,7 @@ func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
 		ScanDepth:      2,
 		NetworkTimeout: "5s",
 	}
-	cfg.Repos = agentEntry(t, agentRepo, fmt.Sprintf("[repo.agent]\non_stuck_cmd = \"sleep 2; echo ran >> %s; exit 1\"\n", marker))
+	cfg.Repos = agentEntry(t, agentRepo, fmt.Sprintf("[repo.agent]\non_stuck_cmd = %q\n", slowAgent))
 	stateDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
@@ -402,13 +405,21 @@ func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
 
 	// Tick 1: agent-repo goes stuck and starts the slow agent. The tick must
-	// return well before the agent's 2s sleep.
+	// return while the agent is still blocked (it cannot finish before the
+	// release file exists, and the 10s cap is far above the bound).
 	start := time.Now()
 	d.tick(ctx)
-	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
-		t.Fatalf("tick 1 took %v, want < 1.5s (the agent run must not block the tick)", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("tick 1 took %v, want < 5s (the agent run must not block the tick)", elapsed)
+	}
+	if countMarkerRuns(marker) != 0 {
+		t.Fatal("agent finished before tick 1 returned; the tick may have blocked on it")
 	}
 
 	// Tick 2, while the agent is still running: other-repo syncs and the
@@ -416,8 +427,8 @@ func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
 	// flock and returns immediately.
 	start = time.Now()
 	d.tick(ctx)
-	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
-		t.Fatalf("tick 2 took %v, want < 1.5s (the in-flight agent must not delay other repos)", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("tick 2 took %v, want < 5s (the in-flight agent must not delay other repos)", elapsed)
 	}
 
 	sf := status.Read(filepath.Join(stateDir, "status.json"))
@@ -429,15 +440,30 @@ func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
 	}
 
 	// The slow agent's budget lands on disk once it finishes.
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
 	waitAgentBudget(t, stateDir, agentRepo, 1)
+	d.agentRuns.Wait()
+	if err := os.Remove(release); err != nil {
+		t.Fatal(err)
+	}
 
 	// Tick 3 while no run is in flight: the agent runs again (attempt 2 of
-	// 2, still in flight). Tick 4 is refused by the in-flight run; its
-	// result reports MaxAttempts 0 (not engaged) and must not wipe the
-	// displayed budget back to 1/0.
+	// 2, blocked on the release file). Tick 4 is refused by the in-flight
+	// run; its result reports MaxAttempts 0 (not engaged) and must not wipe
+	// the displayed budget back to 1/0.
 	d.tick(ctx)
+	waitForAgentLockHeld(t, stateDir, agentRepo)
+	doneBefore := d.agentRunsDone.Load()
 	d.tick(ctx)
-	time.Sleep(200 * time.Millisecond) // let the refused run's goroutine apply
+	deadline := time.Now().Add(10 * time.Second)
+	for d.agentRunsDone.Load() == doneBefore {
+		if time.Now().After(deadline) {
+			t.Fatal("refused agent run did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	sf = status.Read(filepath.Join(stateDir, "status.json"))
 	if sf == nil {
 		t.Fatal("status file not found")
@@ -748,20 +774,9 @@ func TestDaemonTickAgentDisabledMidRunKeepsBudgetCleared(t *testing.T) {
 	// is still in flight.
 	d.tick(ctx)
 
-	// Wait for the in-flight run to finish (the marker appears when the
-	// command completes).
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(marker); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("agent run did not finish in time")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	// Let the completion goroutine apply (or skip) its result.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the in-flight run's completion goroutine to apply (or skip)
+	// its result.
+	d.agentRuns.Wait()
 
 	sf := status.Read(filepath.Join(stateDir, "status.json"))
 	if sf == nil {

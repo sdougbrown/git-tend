@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ type Daemon struct {
 	logger            *slog.Logger
 	mu                sync.Mutex
 	agentRuns         sync.WaitGroup
+	agentRunsDone     atomic.Int64
 	repos             []scan.Repo
 	offline           map[string]*offlineState
 	stuckLogged       map[string]bool
@@ -425,6 +427,7 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 	d.agentRuns.Add(1)
 	go func() {
 		defer d.agentRuns.Done()
+		defer d.agentRunsDone.Add(1)
 		res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
 		d.mu.Lock()
 		rs, tracked := d.repoStatus[repo.Path]
