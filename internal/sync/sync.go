@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sys/unix"
 
 	"github.com/sdougbrown/git-tend/internal/commit"
@@ -330,14 +331,21 @@ func writeStuck(stateDir, repoPath, reason, lastCommand string, exitCode int, ou
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f, `stuck_at = %q
-reason = %q
-last_command = %q
-last_exit_code = %d
-last_output = """
-%s"""
-`, stuckAt, reason, lastCommand, exitCode, output)
+	// Marshal (rather than hand-formatting) so the repo-influenced output is
+	// escaped: raw """ in it would otherwise break the file's TOML and the
+	// agent would never run for that episode.
+	data, err := toml.Marshal(stuckFile{
+		StuckAt:      stuckAt,
+		Reason:       reason,
+		LastCommand:  lastCommand,
+		LastExitCode: exitCode,
+		LastOutput:   output,
+	})
 	if err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
 		f.Close()
 		return err
 	}

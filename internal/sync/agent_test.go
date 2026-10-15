@@ -743,6 +743,48 @@ func TestWriteStuckRefusesAndLeavesFilesIntactWhileAgentLockHeld(t *testing.T) {
 	}
 }
 
+// writeStuck must escape repo-influenced output that is hostile to TOML
+// (triple quotes, backslashes, quotes) so the flag file still parses and the
+// agent can run for that episode.
+func TestWriteStuckEscapesTOMLHostileOutput(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	hostile := `{
+  "error": "bad ref",
+  "detail": "a\"b \\ backslash \"\"\"",
+  "raw": "\"\"\""
+}
+`
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, hostile); err != nil {
+		t.Fatal(err)
+	}
+
+	// The flag file must parse as TOML.
+	sf, err := readStuckFile(repo)
+	if err != nil {
+		t.Fatalf("readStuckFile: %v", err)
+	}
+
+	// The output must round-trip exactly.
+	if sf.LastOutput != hostile {
+		t.Errorf("LastOutput = %q, want %q", sf.LastOutput, hostile)
+	}
+	// The other fields must survive too.
+	if sf.Reason != "hook_failed" {
+		t.Errorf("Reason = %q, want hook_failed", sf.Reason)
+	}
+	if sf.LastCommand != "git commit" {
+		t.Errorf("LastCommand = %q, want git commit", sf.LastCommand)
+	}
+	if sf.LastExitCode != 1 {
+		t.Errorf("LastExitCode = %d, want 1", sf.LastExitCode)
+	}
+	if sf.StuckAt == "" {
+		t.Error("StuckAt should be set")
+	}
+}
+
 // removeStuckFlagIfCurrent is the compare-and-delete the recovery path uses
 // to clear the flag: it deletes only when the flag's stuck_at still matches
 // the verified record, so a flag that no longer belongs to the episode is
