@@ -222,12 +222,29 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// child (or grandchild), and killing only the shell would orphan it —
 	// still running with daemon privileges.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// Hand the lock fd to the command: the flock lives on the open file
-	// description, so the child (and anything it spawns that inherits the fd)
-	// keeps holding it even if the daemon dies mid-run. Without this, the
-	// kernel would release the lock the instant the daemon died — while the
-	// orphaned command group was still working on the tree.
-	cmd.ExtraFiles = []*os.File{lock}
+	// Hand a read-only dup of the lock fd to the command: the flock lives on
+	// the open file description, so the child (and anything it spawns that
+	// inherits the fd) keeps holding it even if the daemon dies mid-run.
+	// Without this, the kernel would release the lock the instant the daemon
+	// died — while the orphaned command group was still working on the tree.
+	//
+	// The dup is read-only (the lock file is opened O_RDONLY): the command
+	// doesn't need write access to the lock file, and a misbehaving command's
+	// leftover child then holds a read-only fd — a narrower grant than a
+	// writeable one. flock(2) works on any open mode, so a read-only fd still
+	// holds LOCK_EX.
+	dupFd, err := syscall.Dup(int(lock.Fd()))
+	if err != nil {
+		res.Err = err
+		return res
+	}
+	lockDup := os.NewFile(uintptr(dupFd), "agent-lock")
+	defer lockDup.Close()
+	// Keep the parent's copy from leaking to other children the daemon spawns.
+	if _, cerr := unix.FcntlInt(uintptr(dupFd), unix.F_SETFD, unix.O_CLOEXEC); cerr != nil && logger != nil {
+		logger.Debug("agent unstick: setting CLOEXEC on the lock dup", "repo", repoPath, "error", cerr)
+	}
+	cmd.ExtraFiles = []*os.File{lockDup}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -382,9 +399,10 @@ func AgentLockPath(stateDir, repoPath string) string {
 
 // AcquireAgentLock takes the per-repo agent-run flock. Callers that mutate
 // agent-relevant state (RunStuckAgent, writeStuck, `git-tend unstick`) hold it
-// so their record/flag writes serialize against each other. The fd returned
-// must be passed to the agent command via cmd.ExtraFiles so the lock outlives
-// the daemon process (see RunStuckAgent).
+// so their record/flag writes serialize against each other. The fd returned is
+// read-only (flock(2) needs no write access) and must be passed to the agent
+// command via cmd.ExtraFiles so the lock outlives the daemon process (see
+// RunStuckAgent).
 func AcquireAgentLock(stateDir, repoPath string) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Join(stateDir, "agent"), 0755); err != nil {
 		return nil, err
@@ -393,8 +411,14 @@ func AcquireAgentLock(stateDir, repoPath string) (*os.File, error) {
 	// would let any local user LOCK_EX it and block all agent runs. Chmod
 	// after open so a lock file created by an older version at 0644 is
 	// tightened too.
+	//
+	// O_RDONLY: flock(2) works on any open mode, so the lock fd doesn't need
+	// write access. Keeping it read-only means the fd handed to the agent
+	// command (a dup of this one) is read-only too — a misbehaving command's
+	// leftover child then holds a read-only fd, a narrower grant than a
+	// writeable one.
 	lockPath := AgentLockPath(stateDir, repoPath)
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDONLY, 0600)
 	if err != nil {
 		return nil, err
 	}
