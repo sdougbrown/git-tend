@@ -598,6 +598,10 @@ func TestAgentContextOnStdin(t *testing.T) {
 	stdinFile := filepath.Join(t.TempDir(), "stdin")
 
 	writeStuckState(t, stateDir, repo, "hook_failed")
+	rec, err := readStuckRecord(StuckRecordPath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := agentTestConfig("cat > "+stdinFile, nil, 2, "10s")
 
 	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
@@ -614,6 +618,7 @@ func TestAgentContextOnStdin(t *testing.T) {
 		"repo = \"" + repo + "\"",
 		"sync_branch = \"main\"",
 		"reason = \"hook_failed\"",
+		"stuck_at = \"" + rec.StuckAt + "\"",
 		"last_command = \"git commit\"",
 		"last_exit_code = 1",
 		"hook blew up",

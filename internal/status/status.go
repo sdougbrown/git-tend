@@ -31,7 +31,7 @@ type RepoStatus struct {
 	OfflineSince               string `json:"offline_since"`
 	ConsecutiveOfflineFailures int    `json:"consecutive_offline_failures"`
 	AgentAttempts              int    `json:"agent_attempts,omitempty"`
-	AgentMaxAttempts           int    `json:"agent_attempts_max,omitempty"`
+	AgentMaxAttempts           int    `json:"agent_max_attempts,omitempty"`
 }
 
 func Read(path string) *StatusFile {
