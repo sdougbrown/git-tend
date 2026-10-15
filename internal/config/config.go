@@ -66,11 +66,11 @@ type RepoEntry struct {
 var StuckReasons = []string{"hook_failed", "push_rejected", "rebase_conflict", "other"}
 
 // DefaultAgentMaxAttempts is the default [agent] max_attempts. It is exported
-// so RunStuckAgent's un-Parsed-config guard applies the same value.
+// so RunStuckAgent's guard for hand-built configs applies the same value.
 const DefaultAgentMaxAttempts = 2
 
 // DefaultAgentTimeout is the default [agent] timeout. It is exported so
-// RunStuckAgent's un-Parsed-config guard applies the same value.
+// RunStuckAgent's guard for hand-built configs applies the same value.
 const DefaultAgentTimeout = "10m"
 
 type AgentConfig struct {
@@ -82,6 +82,13 @@ type AgentConfig struct {
 
 // Enabled reports whether agent-assisted unstick is configured.
 func (a AgentConfig) Enabled() bool { return a.OnStuckCmd != "" }
+
+// nonzero reports whether any agent key decoded from a .gittend was set, so
+// clearUserOnlyKeys can warn about the [agent] table as one unit even when
+// only a non-string key like max_attempts was given.
+func (a AgentConfig) nonzero() bool {
+	return a.OnStuckCmd != "" || len(a.AllowedReasons) > 0 || a.MaxAttempts != 0 || a.Timeout != ""
+}
 
 // AllowsReason reports whether reason may trigger the agent, given an explicit
 // allowlist (empty/nil means the default: everything except rebase_conflict).
@@ -383,28 +390,31 @@ var warnf = func(format string, args ...interface{}) {
 // userOnlyKeys lists per-repo keys honored only from a user-config [[repo]]
 // entry: a .gittend value for any of these is ignored with a warning, since
 // the keys execute commands with the daemon's privileges and a repo writer
-// must not control them. field addresses the key's decoded struct field so
-// the check cannot be bypassed by alternate key spellings (go-toml matches
-// struct fields case-insensitively, so [COMMIT] and MODEL_CMD decode into
-// the same field a plain model_cmd would); to add another key, add one line
-// here.
+// must not control them. set reports whether the key decoded to a non-empty
+// value and clear zeroes it; the pair (rather than a field pointer) lets
+// non-string and grouped keys like the whole [agent] table be expressed.
+// Both inspect the decoded struct fields, so the check cannot be bypassed by
+// alternate key spellings (go-toml matches struct fields case-insensitively,
+// so [COMMIT] and MODEL_CMD decode into the same field a plain model_cmd
+// would); to add another key, add one line here.
 var userOnlyKeys = []struct {
 	key   string
-	field func(*Config) *string
+	set   func(*Config) bool
+	clear func(*Config)
 }{
-	{key: "commit.model_cmd", field: func(c *Config) *string { return &c.Commit.ModelCmd }},
+	{key: "commit.model_cmd", set: func(c *Config) bool { return c.Commit.ModelCmd != "" }, clear: func(c *Config) { c.Commit.ModelCmd = "" }},
+	{key: "agent", set: func(c *Config) bool { return c.Agent.nonzero() }, clear: func(c *Config) { c.Agent = AgentConfig{} }},
 }
 
 // clearUserOnlyKeys zeroes user-only keys decoded from a .gittend, warning
 // about each one that was set.
 func clearUserOnlyKeys(cfg *Config, repoPath string) {
 	for _, k := range userOnlyKeys {
-		p := k.field(cfg)
-		if *p == "" {
+		if !k.set(cfg) {
 			continue
 		}
 		warnf("%s: ignoring %s from .gittend; set it in a [[repo]] entry of the user config instead", repoPath, k.key)
-		*p = ""
+		k.clear(cfg)
 	}
 }
 
@@ -414,7 +424,6 @@ func clearUserOnlyKeys(cfg *Config, repoPath string) {
 // result. gittendPath may be empty when the repo has no .gittend file.
 func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, error) {
 	var cfg Config
-	maxAttemptsPresent := false
 
 	if gittendPath != "" {
 		data, err := os.ReadFile(gittendPath)
@@ -425,20 +434,18 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 		if err != nil {
 			return nil, err
 		}
-		var raw map[string]any
-		if err := toml.Unmarshal(data, &raw); err == nil {
-			maxAttemptsPresent = rawAgentMaxAttemptsPresent(raw)
-		}
 	}
 
 	if entry != nil {
 		if err := overlayEntry(&cfg, entry, repoPath); err != nil {
 			return nil, err
 		}
-		maxAttemptsPresent = maxAttemptsPresent || rawAgentMaxAttemptsPresent(entry.Raw)
 	}
 
-	if !maxAttemptsPresent {
+	// Only the user entry can carry agent keys (parseRepoConfig strips them
+	// from .gittend), so its raw table alone decides whether an explicit
+	// max_attempts must be honored or the default applies.
+	if entry == nil || !rawAgentMaxAttemptsPresent(entry.Raw) {
 		cfg.Agent.MaxAttempts = DefaultAgentMaxAttempts
 	}
 
@@ -499,10 +506,10 @@ func parseRepoConfig(data []byte, gittendPath, repoPath string) (Config, error) 
 	return cfg, nil
 }
 
-// rawAgentMaxAttemptsPresent reports whether a raw TOML table carries an
-// [agent] max_attempts key. Key names are matched case-insensitively, the way
-// go-toml matches struct fields, so [AGENT] MAX_ATTEMPTS counts the same as
-// agent.max_attempts.
+// rawAgentMaxAttemptsPresent reports whether a [[repo]] entry's raw TOML
+// table carries an [repo.agent] max_attempts key. Key names are matched
+// case-insensitively, the way go-toml matches struct fields, so
+// [repo.AGENT] MAX_ATTEMPTS counts the same as repo.agent.max_attempts.
 func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
 	for k, v := range raw {
 		if !strings.EqualFold(k, "agent") {

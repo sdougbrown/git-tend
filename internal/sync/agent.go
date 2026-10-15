@@ -109,9 +109,9 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return res
 	}
 
-	// An un-Parsed config (tests, direct callers) leaves MaxAttempts at 0,
+	// A hand-built config (tests, direct callers) can leave MaxAttempts at 0,
 	// which would make the cap below permanently disable the agent; apply the
-	// same default config.Parse does.
+	// same default Resolve does.
 	maxAttempts := agent.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = defaultAgentMaxAttempts
@@ -356,7 +356,7 @@ func removeStuckFlagIfCurrent(repoPath, stuckAt string) error {
 	return os.Remove(filepath.Join(repoPath, ".gittend.stuck"))
 }
 
-// RunStuckAgent also guards on the default so callers passing an un-Parsed
+// RunStuckAgent also guards on the default so callers passing a hand-built
 // config (tests, direct callers) don't get a permanently disabled agent
 // (MaxAttempts 0 would trip the cap immediately).
 const defaultAgentMaxAttempts = config.DefaultAgentMaxAttempts
