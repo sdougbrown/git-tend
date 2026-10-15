@@ -235,3 +235,13 @@ func TestScanUserEntrySymlinkLoadedOnce(t *testing.T) {
 		t.Errorf("unexpected merged config: %+v", repos[0].Config)
 	}
 }
+
+func TestScanSkipsRepoWithInvalidGittend(t *testing.T) {
+	root := t.TempDir()
+	makeRepo(t, filepath.Join(root, "bad-repo"), "mode = \"bogus\"\n")
+
+	repos := ScanRoots(cfgFor(t, root, 3, ""))
+	if len(repos) != 0 {
+		t.Fatalf("expected 0 repos, got %d", len(repos))
+	}
+}

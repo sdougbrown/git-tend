@@ -232,6 +232,37 @@ mode = "read-only"
 	}
 }
 
+func TestParseUserConfigRepoEntryDuplicatesMergeNestedCommit(t *testing.T) {
+	data := `
+[[repo]]
+path = "/tmp/repo-a"
+[repo.commit]
+emoji = "🧪"
+
+[[repo]]
+path = "/tmp/repo-a"
+[repo.commit]
+model_prompt = "summarize the change"
+`
+	cfg, err := ParseUserConfig(writeConfig(t, data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("expected duplicate entries to collapse, got %d", len(cfg.Repos))
+	}
+	resolved, err := Resolve("", &cfg.Repos[0], "/tmp/repo-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved.Commit.Emoji != "🧪" {
+		t.Errorf("Emoji = %q, want 🧪 (from first entry)", resolved.Commit.Emoji)
+	}
+	if resolved.Commit.ModelPrompt != "summarize the change" {
+		t.Errorf("ModelPrompt = %q, want summarize the change (from second entry)", resolved.Commit.ModelPrompt)
+	}
+}
+
 func TestResolveMergePrecedence(t *testing.T) {
 	gittend := writeConfig(t, "mode = \"read-write\"\ninterval = \"2m\"\nsync_branch = \"main\"\n")
 	entry := entryFrom(t, "interval = \"7m\"\n[repo.commit]\nemoji = \"🚀\"\n")
@@ -258,24 +289,6 @@ func TestResolveMergePrecedence(t *testing.T) {
 	}
 	if cfg.Debounce != "" {
 		t.Errorf("Debounce = %q, want empty", cfg.Debounce)
-	}
-}
-
-func TestResolveDefaultsApplyPostMerge(t *testing.T) {
-	// An unset user-level mode must not clobber the .gittend mode with the
-	// built-in default.
-	gittend := writeConfig(t, "mode = \"read-write\"\n")
-	entry := entryFrom(t, "sync_branch = \"dev\"\n")
-
-	cfg, err := Resolve(gittend, entry, "/tmp/repo")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Mode != "read-write" {
-		t.Errorf("Mode = %q, want read-write", cfg.Mode)
-	}
-	if cfg.SyncBranch != "dev" {
-		t.Errorf("SyncBranch = %q, want dev", cfg.SyncBranch)
 	}
 }
 

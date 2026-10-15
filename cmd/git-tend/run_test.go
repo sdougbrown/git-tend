@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
 )
@@ -101,8 +103,8 @@ func TestRunRepoRequiresOptIn(t *testing.T) {
 
 	t.Chdir(repo)
 	err := runRepo(&cobra.Command{}, []string{"."})
-	if err == nil || !strings.Contains(err.Error(), "no .gittend config and no matching [[repo]] entry") {
-		t.Errorf("expected not-opted-in error, got: %v", err)
+	if !errors.Is(err, config.ErrNotOptedIn) {
+		t.Errorf("expected ErrNotOptedIn, got: %v", err)
 	}
 }
 
