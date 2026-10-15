@@ -555,5 +555,8 @@ func parseAgentTimeout(timeout string) time.Duration {
 	if d, err := time.ParseDuration(timeout); err == nil && d > 0 {
 		return d
 	}
-	return 10 * time.Minute
+	// config.DefaultAgentTimeout is a compile-time constant known to be a
+	// valid duration, so this cannot fail.
+	d, _ := time.ParseDuration(config.DefaultAgentTimeout)
+	return d
 }

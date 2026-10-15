@@ -69,6 +69,10 @@ var StuckReasons = []string{"hook_failed", "push_rejected", "rebase_conflict", "
 // so RunStuckAgent's un-Parsed-config guard applies the same value.
 const DefaultAgentMaxAttempts = 2
 
+// DefaultAgentTimeout is the default [agent] timeout. It is exported so
+// RunStuckAgent's un-Parsed-config guard applies the same value.
+const DefaultAgentTimeout = "10m"
+
 type AgentConfig struct {
 	OnStuckCmd     string   `toml:"on_stuck_cmd"`
 	AllowedReasons []string `toml:"allowed_reasons"`
@@ -568,7 +572,7 @@ func finalizeConfig(cfg *Config) error {
 		}
 	}
 	if cfg.Agent.Timeout == "" {
-		cfg.Agent.Timeout = "10m"
+		cfg.Agent.Timeout = DefaultAgentTimeout
 	}
 
 	if cfg.Agent.MaxAttempts <= 0 {
