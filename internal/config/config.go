@@ -324,50 +324,29 @@ var warnf = func(format string, args ...interface{}) {
 // userOnlyKeys lists per-repo keys honored only from a user-config [[repo]]
 // entry: a .gittend value for any of these is ignored with a warning, since
 // the keys execute commands with the daemon's privileges and a repo writer
-// must not control them. Each key is addressed by its path within a repo's
-// config table; to add another key, add one line here.
+// must not control them. field addresses the key's decoded struct field so
+// the check cannot be bypassed by alternate key spellings (go-toml matches
+// struct fields case-insensitively, so [COMMIT] and MODEL_CMD decode into
+// the same field a plain model_cmd would); to add another key, add one line
+// here.
 var userOnlyKeys = []struct {
-	key  string
-	path []string
+	key   string
+	field func(*Config) *string
 }{
-	{key: "commit.model_cmd", path: []string{"commit", "model_cmd"}},
+	{key: "commit.model_cmd", field: func(c *Config) *string { return &c.Commit.ModelCmd }},
 }
 
-// stripUserOnlyKeys removes user-only keys from a .gittend's raw config
-// table, warning about each one that was set.
-func stripUserOnlyKeys(raw map[string]any, repoPath string) {
+// clearUserOnlyKeys zeroes user-only keys decoded from a .gittend, warning
+// about each one that was set.
+func clearUserOnlyKeys(cfg *Config, repoPath string) {
 	for _, k := range userOnlyKeys {
-		if !rawHasKey(raw, k.path) {
+		p := k.field(cfg)
+		if *p == "" {
 			continue
 		}
 		warnf("%s: ignoring %s from .gittend; set it in a [[repo]] entry of the user config instead", repoPath, k.key)
-		deleteRawKey(raw, k.path)
+		*p = ""
 	}
-}
-
-func rawHasKey(raw map[string]any, path []string) bool {
-	m := raw
-	for _, p := range path[:len(path)-1] {
-		next, ok := m[p].(map[string]any)
-		if !ok {
-			return false
-		}
-		m = next
-	}
-	_, ok := m[path[len(path)-1]]
-	return ok
-}
-
-func deleteRawKey(raw map[string]any, path []string) {
-	m := raw
-	for _, p := range path[:len(path)-1] {
-		next, ok := m[p].(map[string]any)
-		if !ok {
-			return
-		}
-		m = next
-	}
-	delete(m, path[len(path)-1])
 }
 
 // Resolve returns the effective per-repo config for the repo at repoPath:
@@ -406,23 +385,14 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 	return &cfg, nil
 }
 
-// parseRepoConfig decodes a .gittend, dropping user-only keys first so the
-// decoded config can never pick one up.
+// parseRepoConfig decodes a .gittend, zeroing user-only keys so the decoded
+// config can never carry one.
 func parseRepoConfig(data []byte, gittendPath, repoPath string) (Config, error) {
-	var raw map[string]any
-	if err := toml.Unmarshal(data, &raw); err != nil {
-		return Config{}, fmt.Errorf("parsing config %s: %w", gittendPath, err)
-	}
-	stripUserOnlyKeys(raw, repoPath)
-
-	data, err := toml.Marshal(raw)
-	if err != nil {
-		return Config{}, fmt.Errorf("parsing config %s: %w", gittendPath, err)
-	}
 	var cfg Config
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing config %s: %w", gittendPath, err)
 	}
+	clearUserOnlyKeys(&cfg, repoPath)
 	return cfg, nil
 }
 

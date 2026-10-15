@@ -291,28 +291,42 @@ func TestResolveEntryOnlyAppliesDefaults(t *testing.T) {
 }
 
 func TestResolveGittendModelCmdIgnoredWithWarning(t *testing.T) {
-	var warnings []string
-	origWarn := warnf
-	warnf = func(format string, args ...interface{}) {
-		warnings = append(warnings, fmt.Sprintf(format, args...))
+	// go-toml matches struct fields case-insensitively, so every spelling of
+	// the key (and of its table) must still be caught by the strip.
+	tests := []struct {
+		name    string
+		gittend string
+	}{
+		{name: "plain", gittend: "[commit]\nstrategy = \"model\"\nmodel_cmd = \"evil\"\n"},
+		{name: "uppercase key", gittend: "[commit]\nstrategy = \"model\"\nMODEL_CMD = \"evil\"\n"},
+		{name: "uppercase table", gittend: "[COMMIT]\nstrategy = \"model\"\nmodel_cmd = \"evil\"\n"},
+		{name: "inline table", gittend: "commit = { strategy = \"model\", Model_Cmd = \"evil\" }\n"},
 	}
-	defer func() { warnf = origWarn }()
 
-	gittend := writeConfig(t, "mode = \"read-write\"\n[commit]\nstrategy = \"model\"\nmodel_cmd = \"evil-cmd\"\n")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var warnings []string
+			origWarn := warnf
+			warnf = func(format string, args ...interface{}) {
+				warnings = append(warnings, fmt.Sprintf(format, args...))
+			}
+			defer func() { warnf = origWarn }()
 
-	cfg, err := Resolve(gittend, nil, "/tmp/repo")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Commit.ModelCmd != "" {
-		t.Errorf("ModelCmd = %q, want empty (ignored)", cfg.Commit.ModelCmd)
-	}
-	// With no user-level model_cmd, the strategy degrades to deterministic.
-	if cfg.Commit.Strategy != "deterministic" {
-		t.Errorf("Strategy = %q, want deterministic", cfg.Commit.Strategy)
-	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "/tmp/repo") || !strings.Contains(warnings[0], "commit.model_cmd") {
-		t.Errorf("expected warning naming repo and key, got: %v", warnings)
+			cfg, err := Resolve(writeConfig(t, tt.gittend), nil, "/tmp/repo")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Commit.ModelCmd != "" {
+				t.Errorf("ModelCmd = %q, want empty (ignored)", cfg.Commit.ModelCmd)
+			}
+			// With no user-level model_cmd, the strategy degrades to deterministic.
+			if cfg.Commit.Strategy != "deterministic" {
+				t.Errorf("Strategy = %q, want deterministic", cfg.Commit.Strategy)
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], "/tmp/repo") || !strings.Contains(warnings[0], "commit.model_cmd") {
+				t.Errorf("expected warning naming repo and key, got: %v", warnings)
+			}
+		})
 	}
 }
 
