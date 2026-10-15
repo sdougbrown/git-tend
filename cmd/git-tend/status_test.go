@@ -15,6 +15,9 @@ import (
 func TestRunStatusAgentStates(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	// Force paths.StateDir() to resolve under HOME regardless of the runner's
+	// XDG_STATE_HOME, so the state dir we create is the one status reads.
+	t.Setenv("XDG_STATE_HOME", "")
 
 	stateDir := filepath.Join(tmpHome, ".local", "state", "git-tend")
 	os.MkdirAll(stateDir, 0755)

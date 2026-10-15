@@ -207,6 +207,42 @@ func TestCorruptAttemptRecordFailsClosed(t *testing.T) {
 	}
 }
 
+// A corrupt attempt record must fail closed even when the agent lock is
+// contended: the contended path reads the record to report the budget, and an
+// unparseable record must surface as a spent budget, not a fresh one.
+func TestCorruptAttemptRecordFailsClosedWhenLockHeld(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	recordPath := AgentStatePath(stateDir, repo)
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the agent lock so RunStuckAgent takes the contended path.
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent must not run when the lock is held")
+	}
+	if res.Attempts != 2 {
+		t.Errorf("Attempts = %d, want 2 (fail-closed on a corrupt record)", res.Attempts)
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("agent command should not have executed")
+	}
+}
+
 func TestAgentMaxAttemptsOnlyWhenEngaged(t *testing.T) {
 	repo := t.TempDir()
 	stateDir := t.TempDir()
