@@ -64,3 +64,26 @@ func TestSamePathTildeExpansion(t *testing.T) {
 		t.Errorf("tilde path should match expanded path")
 	}
 }
+
+func TestSamePathCaseSensitivity(t *testing.T) {
+	// Case-insensitive matching is only enabled on darwin at runtime, but the
+	// comparison logic itself is exercised here on every platform.
+	if !samePath("/tmp/Repo", "/tmp/repo", true) {
+		t.Error("case-insensitive comparison should match differing case")
+	}
+	if samePath("/tmp/Repo", "/tmp/repo", false) {
+		t.Error("case-sensitive comparison should not match differing case")
+	}
+
+	dir := t.TempDir()
+	real := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(real, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(filepath.Join(dir, "REPO"), real, true) {
+		t.Error("case-insensitive comparison should match an existing directory")
+	}
+	if samePath(filepath.Join(dir, "REPO"), real, false) {
+		t.Error("case-sensitive comparison should not match an existing directory")
+	}
+}

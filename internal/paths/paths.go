@@ -65,23 +65,35 @@ func ExpandPath(path string) string {
 // tilde expansion, cleaning, and best-effort symlink resolution. Resolution
 // is attempted on each side independently, so a symlinked root (e.g. a
 // ~/Code symlink farm) still matches its real path; paths that do not exist
-// are compared as cleaned strings.
+// are compared as cleaned strings. On darwin, where the default file
+// systems are case-insensitive, the comparison ignores case so an entry
+// path differing only in case from the scanned path still matches.
 func SamePath(a, b string) bool {
+	return samePath(a, b, runtime.GOOS == "darwin")
+}
+
+// samePath is SamePath with the case sensitivity of the comparison made
+// explicit so it can be exercised on case-sensitive file systems too.
+func samePath(a, b string, caseInsensitive bool) bool {
+	equal := func(x, y string) bool { return x == y }
+	if caseInsensitive {
+		equal = strings.EqualFold
+	}
 	a = ExpandPath(a)
 	b = ExpandPath(b)
-	if a == b {
+	if equal(a, b) {
 		return true
 	}
 	resA, okA := resolve(a)
 	resB, okB := resolve(b)
 	if okA && okB {
-		return resA == resB
+		return equal(resA, resB)
 	}
 	if okA {
-		return resA == b
+		return equal(resA, b)
 	}
 	if okB {
-		return a == resB
+		return equal(a, resB)
 	}
 	return false
 }
