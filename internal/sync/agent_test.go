@@ -1021,34 +1021,79 @@ func TestAgentContextResistsOutputInjection(t *testing.T) {
 	}
 }
 
-// A successful sync that lands while an agent run is in flight clears the
-// agent state; the run's final write must not re-create the attempt record,
-// or the budget would not reset on that sync.
-func TestAgentRunDoesNotRecreateAttemptAfterSyncReset(t *testing.T) {
+// A successful sync that lands while an agent run is in flight must not reset
+// the agent state: the reset is skipped (the run's final attempt write would
+// otherwise race it) and performed by the next successful sync.
+func TestClearAgentStateSkipsWhileAgentRunInFlight(t *testing.T) {
 	for _, code := range []int{0, 1} {
 		t.Run("exit"+strconv.Itoa(code), func(t *testing.T) {
 			repo := t.TempDir()
 			stateDir := t.TempDir()
-			release := filepath.Join(t.TempDir(), "release")
+			scratch := t.TempDir()
+			started := filepath.Join(scratch, "started")
+			release := filepath.Join(scratch, "release")
 
 			writeStuckState(t, stateDir, repo, "hook_failed")
-			cfg := agentTestConfig("while [ ! -f "+release+" ]; do sleep 0.02; done; exit "+strconv.Itoa(code), nil, 2, "30s")
+			cfg := agentTestConfig("touch "+started+"; while [ ! -f "+release+" ]; do sleep 0.02; done; exit "+strconv.Itoa(code), nil, 2, "30s")
 
 			done := make(chan AgentRunResult, 1)
 			go func() {
 				done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
 			}()
-			waitForAgentLock(t, stateDir, repo)
+			waitForFile(t, started)
 
 			clearAgentState(stateDir, repo)
+			if _, err := os.Stat(StuckRecordPath(stateDir, repo)); err != nil {
+				t.Errorf("provenance record should survive a reset skipped for an in-flight run: %v", err)
+			}
 			if err := os.WriteFile(release, nil, 0644); err != nil {
 				t.Fatal(err)
 			}
 			<-done
 
+			att, err := readAgentAttempt(AgentStatePath(stateDir, repo))
+			if err != nil || att.Attempts != 1 {
+				t.Fatalf("attempt record = %+v (err %v), want Attempts 1", att, err)
+			}
+
+			clearAgentState(stateDir, repo)
 			if _, err := os.Stat(AgentStatePath(stateDir, repo)); !os.IsNotExist(err) {
-				t.Errorf("attempt record re-created after a successful sync reset the budget (stat err: %v)", err)
+				t.Errorf("attempt record should be removed by a reset with no run in flight (stat err: %v)", err)
+			}
+			if _, err := os.Stat(StuckRecordPath(stateDir, repo)); !os.IsNotExist(err) {
+				t.Errorf("provenance record should be removed by a reset with no run in flight (stat err: %v)", err)
 			}
 		})
+	}
+}
+
+// An agent that deletes the daemon-issued provenance record mid-run must not
+// reset its own budget.
+func TestAgentDeletingProvenanceRecordDoesNotResetBudget(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig("rm "+StuckRecordPath(stateDir, repo)+"; exit 0", nil, 2, "30s")
+
+	RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+
+	att, err := readAgentAttempt(AgentStatePath(stateDir, repo))
+	if err != nil || att.Attempts != 1 {
+		t.Fatalf("attempt record = %+v (err %v), want Attempts 1", att, err)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

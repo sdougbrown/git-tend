@@ -92,13 +92,20 @@ func sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir str
 // budget and the daemon-issued provenance record are both reset. Errors are
 // ignored: stale state fails safe — the agent just won't run.
 //
-// This runs without the agent lock, so it cannot wait on an in-flight run. The
-// provenance record goes first: it is the marker saveAgentAttempt checks after
-// its write, so an in-flight run either sees the marker gone and removes its
-// own attempt record, or finishes writing before the removal below.
+// The reset needs the agent lock so it can't interleave with an in-flight
+// run's final attempt write. The lock is only try-locked: waiting would stall
+// sync for the agent's whole timeout, and the agent's own record path never
+// blocks on the sync lock either, so neither side can deadlock. When a run
+// holds the lock the reset is skipped, which only keeps the budget
+// conservative; the next successful sync performs it.
 func clearAgentState(stateDir, repoPath string) {
-	_ = os.Remove(StuckRecordPath(stateDir, repoPath))
+	lock, err := AcquireAgentLock(stateDir, repoPath)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
 	_ = os.Remove(AgentStatePath(stateDir, repoPath))
+	_ = os.Remove(StuckRecordPath(stateDir, repoPath))
 }
 
 func parseIntervalTimeout(interval string) time.Duration {

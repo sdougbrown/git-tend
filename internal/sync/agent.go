@@ -280,7 +280,7 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 		// exit 0 that doesn't actually fix the repo must leave the spent
 		// attempt on disk — otherwise every episode re-arms a fresh budget. A
 		// successful sync or `git-tend unstick` clears the record instead.
-		if err := saveAgentAttempt(stateDir, repoPath, rec.StuckAt, record); err != nil && logger != nil {
+		if err := writeAgentAttempt(recordPath, record); err != nil && logger != nil {
 			logger.Error("agent unstick: saving attempt record after recovery", "repo", repoPath, "error", err)
 		}
 		// Re-verify the flag's stuck_at still matches the verified record
@@ -302,7 +302,7 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 
 	res.Err = runErr
 	record.LastExitCode = exitCodeFromErr(runErr)
-	if err := saveAgentAttempt(stateDir, repoPath, rec.StuckAt, record); err != nil && logger != nil {
+	if err := writeAgentAttempt(recordPath, record); err != nil && logger != nil {
 		logger.Error("agent unstick: saving attempt record", "repo", repoPath, "error", err)
 	}
 	if logger != nil {
@@ -549,24 +549,6 @@ func writeJSONAtomic(path string, v any) error {
 
 func writeAgentAttempt(path string, a agentAttempt) error {
 	return writeJSONAtomic(path, a)
-}
-
-// saveAgentAttempt persists the attempt record for the episode identified by
-// stuckAt, then re-checks that the episode's provenance record still exists.
-// A successful sync clears the provenance record before the attempt record
-// (see clearAgentState) without taking the agent lock, so a missing or
-// replaced provenance record after the write means the episode was reset
-// while the run was in flight: the write is undone so the budget stays reset.
-// Whichever side acts last removes the attempt record.
-func saveAgentAttempt(stateDir, repoPath, stuckAt string, a agentAttempt) error {
-	path := AgentStatePath(stateDir, repoPath)
-	if err := writeAgentAttempt(path, a); err != nil {
-		return err
-	}
-	if rec, err := readStuckRecord(StuckRecordPath(stateDir, repoPath)); os.IsNotExist(err) || (err == nil && rec.StuckAt != stuckAt) {
-		_ = os.Remove(path)
-	}
-	return nil
 }
 
 func parseAgentTimeout(timeout string) time.Duration {
