@@ -1020,3 +1020,35 @@ func TestAgentContextResistsOutputInjection(t *testing.T) {
 		t.Errorf("context last_output = %q, want the hostile output intact %q", got, hostile)
 	}
 }
+
+// A successful sync that lands while an agent run is in flight clears the
+// agent state; the run's final write must not re-create the attempt record,
+// or the budget would not reset on that sync.
+func TestAgentRunDoesNotRecreateAttemptAfterSyncReset(t *testing.T) {
+	for _, code := range []int{0, 1} {
+		t.Run("exit"+strconv.Itoa(code), func(t *testing.T) {
+			repo := t.TempDir()
+			stateDir := t.TempDir()
+			release := filepath.Join(t.TempDir(), "release")
+
+			writeStuckState(t, stateDir, repo, "hook_failed")
+			cfg := agentTestConfig("while [ ! -f "+release+" ]; do sleep 0.02; done; exit "+strconv.Itoa(code), nil, 2, "30s")
+
+			done := make(chan AgentRunResult, 1)
+			go func() {
+				done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+			}()
+			waitForAgentLock(t, stateDir, repo)
+
+			clearAgentState(stateDir, repo)
+			if err := os.WriteFile(release, nil, 0644); err != nil {
+				t.Fatal(err)
+			}
+			<-done
+
+			if _, err := os.Stat(AgentStatePath(stateDir, repo)); !os.IsNotExist(err) {
+				t.Errorf("attempt record re-created after a successful sync reset the budget (stat err: %v)", err)
+			}
+		})
+	}
+}

@@ -91,9 +91,14 @@ func sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir str
 // successful sync means the flag is gone and the repo syncs, so the attempt
 // budget and the daemon-issued provenance record are both reset. Errors are
 // ignored: stale state fails safe — the agent just won't run.
+//
+// This runs without the agent lock, so it cannot wait on an in-flight run. The
+// provenance record goes first: it is the marker saveAgentAttempt checks after
+// its write, so an in-flight run either sees the marker gone and removes its
+// own attempt record, or finishes writing before the removal below.
 func clearAgentState(stateDir, repoPath string) {
-	_ = os.Remove(AgentStatePath(stateDir, repoPath))
 	_ = os.Remove(StuckRecordPath(stateDir, repoPath))
+	_ = os.Remove(AgentStatePath(stateDir, repoPath))
 }
 
 func parseIntervalTimeout(interval string) time.Duration {
