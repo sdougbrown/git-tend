@@ -23,7 +23,7 @@ func TestRunStatusAgentStates(t *testing.T) {
 		Repos: map[string]status.RepoStatus{
 			"/repos/agent-pending":   {CurrentState: "stuck", AgentAttempts: 1, AgentMaxAttempts: 2},
 			"/repos/agent-exhausted": {CurrentState: "stuck", AgentAttempts: 2, AgentMaxAttempts: 2},
-			"/repos/plain-stuck":        {CurrentState: "stuck"},
+			"/repos/plain-stuck":     {CurrentState: "stuck"},
 		},
 	}
 	status.Write(filepath.Join(stateDir, "status.json"), sf)

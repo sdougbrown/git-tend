@@ -201,8 +201,12 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// only resets on a successful sync or a human unstick.
 	res.Attempts = record.Attempts
 	if record.Attempts >= maxAttempts {
+		// The budget was already spent on a prior run; the daemon's per-tick
+		// loop re-enters here every tick, so log at Debug to avoid flooding.
+		// The Info line is emitted once, on the run that exhausts the budget
+		// (see the failure path below).
 		if logger != nil {
-			logger.Info("agent unstick: attempt cap reached, waiting for human", "repo", repoPath,
+			logger.Debug("agent unstick: attempt cap reached, waiting for human", "repo", repoPath,
 				"attempts", record.Attempts, "max_attempts", maxAttempts)
 		}
 		return res
@@ -240,7 +244,7 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 	go func() {
 		defer stdin.Close()
-		writeAgentContext(stdin, repoPath, cfg.SyncBranch, stuck)
+		writeAgentContext(stdin, repoPath, cfg.SyncBranch, rec, stuck)
 	}()
 
 	res.Ran = true
@@ -284,6 +288,13 @@ func RunStuckAgent(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 	if logger != nil {
 		logger.Warn("agent unstick: command failed", "repo", repoPath, "error", runErr,
+			"attempts", record.Attempts, "max_attempts", maxAttempts)
+	}
+	// Log the cap at Info only on the run that exhausts the budget (the
+	// transition into exhausted). The pre-run cap check above logs Debug on
+	// every repeat tick, so the daemon's per-tick loop doesn't flood the log.
+	if record.Attempts == maxAttempts && logger != nil {
+		logger.Info("agent unstick: attempt cap reached, waiting for human", "repo", repoPath,
 			"attempts", record.Attempts, "max_attempts", maxAttempts)
 	}
 	return res
@@ -420,12 +431,14 @@ func writeStuckRecord(stateDir, repoPath, stuckAt, reason string) error {
 }
 
 // writeAgentContext writes the structured context document the agent command
-// receives on stdin: the stuck file contents plus the repo path and sync branch.
-func writeAgentContext(w io.Writer, repoPath, syncBranch string, stuck *stuckFile) {
+// receives on stdin: the daemon-observed reason (authoritative for the
+// allowlist) plus the stuck file's diagnostic fields, the repo path, and the
+// sync branch. The repo-local file is untrusted, so its reason is not used.
+func writeAgentContext(w io.Writer, repoPath, syncBranch string, rec *stuckRecord, stuck *stuckFile) {
 	fmt.Fprintf(w, "repo = %q\n", repoPath)
 	fmt.Fprintf(w, "sync_branch = %q\n", syncBranch)
-	fmt.Fprintf(w, "stuck_at = %q\n", stuck.StuckAt)
-	fmt.Fprintf(w, "reason = %q\n", stuck.Reason)
+	fmt.Fprintf(w, "stuck_at = %q\n", rec.StuckAt)
+	fmt.Fprintf(w, "reason = %q\n", rec.Reason)
 	fmt.Fprintf(w, "last_command = %q\n", stuck.LastCommand)
 	fmt.Fprintf(w, "last_exit_code = %d\n", stuck.LastExitCode)
 	fmt.Fprintf(w, "last_output = \"\"\"\n%s\"\"\"\n", stuck.LastOutput)
