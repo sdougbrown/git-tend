@@ -34,6 +34,7 @@ type Daemon struct {
 	stateDir          string
 	logger            *slog.Logger
 	mu                sync.Mutex
+	agentRuns         sync.WaitGroup
 	repos             []scan.Repo
 	offline           map[string]*offlineState
 	stuckLogged       map[string]bool
@@ -421,10 +422,15 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 		d.mu.Unlock()
 		return
 	}
+	d.agentRuns.Add(1)
 	go func() {
+		defer d.agentRuns.Done()
 		res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
 		d.mu.Lock()
-		rs := d.repoStatus[repo.Path]
+		rs, tracked := d.repoStatus[repo.Path]
+		// A rescan that dropped the repo mid-run removed its entry; storing
+		// the zero value back would resurrect it (rendered as "ok").
+		//
 		// Apply the result only when the run was engaged (MaxAttempts > 0 —
 		// a lock-refused run reports 0) and the agent is still enabled at
 		// completion: an operator who removed on_stuck_cmd mid-run must not
@@ -441,12 +447,14 @@ func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
 				break
 			}
 		}
-		if engaged && res.MaxAttempts > 0 && (rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts) {
+		if tracked && engaged && res.MaxAttempts > 0 && (rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts) {
 			rs.AgentAttempts = res.Attempts
 			rs.AgentMaxAttempts = res.MaxAttempts
 			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		}
-		d.repoStatus[repo.Path] = rs
+		if tracked {
+			d.repoStatus[repo.Path] = rs
+		}
 		d.mu.Unlock()
 		d.writeStatus()
 	}()

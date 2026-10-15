@@ -773,6 +773,43 @@ func TestDaemonTickAgentDisabledMidRunKeepsBudgetCleared(t *testing.T) {
 	}
 }
 
+// A repo removed by a rescan while its agent run is in flight must stay
+// removed: the completion must not re-add a zero-valued status entry, which
+// status renders as "ok".
+func TestDaemonAgentCompletionDoesNotResurrectRemovedRepo(t *testing.T) {
+	repoDir, marker, _, stateDir, d := setupStuckAgentRepo(t)
+
+	release := filepath.Join(t.TempDir(), "release")
+	d.repos[0].Config.Agent.OnStuckCmd = fmt.Sprintf("while [ ! -e %s ]; do sleep 0.05; done; echo ran >> %s; exit 1", release, marker)
+
+	d.tick(context.Background())
+	waitForAgentLockHeld(t, stateDir, repoDir)
+
+	d.userCfg.Roots = []string{t.TempDir()}
+	d.userCfg.Repos = nil
+	d.rescanRoots()
+	if _, ok := d.repoStatus[repoDir]; ok {
+		t.Fatal("rescan did not remove the repo from repoStatus")
+	}
+
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	d.agentRuns.Wait()
+
+	d.mu.Lock()
+	_, tracked := d.repoStatus[repoDir]
+	d.mu.Unlock()
+	if tracked {
+		t.Error("repoStatus re-added the removed repo after the agent run completed")
+	}
+	if sf := status.Read(filepath.Join(stateDir, "status.json")); sf != nil {
+		if _, ok := sf.Repos[repoDir]; ok {
+			t.Error("status file lists the removed repo after the agent run completed")
+		}
+	}
+}
+
 // waitForAgentLockHeld blocks until the agent run holds the per-repo agent
 // lock, proven by a non-blocking flock probe failing on a separate fd.
 func waitForAgentLockHeld(t *testing.T, stateDir, repoPath string) {
