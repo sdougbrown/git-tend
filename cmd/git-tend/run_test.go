@@ -91,6 +91,17 @@ func TestRunRepoEntryOnlyOptIn(t *testing.T) {
 	if strings.TrimSpace(string(out)) != "" {
 		t.Errorf("manual change was not committed: %s", out)
 	}
+	head, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := exec.Command("git", "-C", repo, "ls-remote", "origin", "refs/heads/main").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(remote), strings.TrimSpace(string(head))) {
+		t.Errorf("manual change was not pushed: local HEAD %s, remote %s", head, remote)
+	}
 }
 
 func TestRunRepoRequiresOptIn(t *testing.T) {
