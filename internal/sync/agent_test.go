@@ -468,6 +468,9 @@ func TestAgentTimeout(t *testing.T) {
 	if res.Recovered {
 		t.Fatal("timed-out command must not count as recovery")
 	}
+	if res.Err == nil {
+		t.Error("timed-out command should report an error")
+	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("timeout not enforced, took %s", elapsed)
 	}

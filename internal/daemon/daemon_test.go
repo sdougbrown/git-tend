@@ -305,8 +305,8 @@ func TestDaemonIgnoresGittendAgentSection(t *testing.T) {
 		t.Errorf("agent budget = %d/%d, want 0/0 (the .gittend [agent] section is ignored)", rs.AgentAttempts, rs.AgentMaxAttempts)
 	}
 
-	// Give a wrongly-started agent run time to write its marker.
-	time.Sleep(500 * time.Millisecond)
+	// Any run the tick started finishes (and writes its marker) before Wait returns.
+	d.agentRuns.Wait()
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("agent command ran although only the .gittend configured it")
 	}
