@@ -76,6 +76,23 @@ func initRepoWithRemote(t *testing.T, repoDir, remote, mode, debounce, extraFile
 	}
 }
 
+// agentEntry parses agentTOML (a [repo.agent] table) as a user-level [[repo]]
+// entry for repoDir, so tests configure the agent the way production does —
+// through the user config, never the repo's .gittend.
+func agentEntry(t *testing.T, repoDir, agentTOML string) []config.RepoEntry {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "user-config.toml")
+	doc := fmt.Sprintf("[[repo]]\npath = %q\n%s", repoDir, agentTOML)
+	if err := os.WriteFile(path, []byte(doc), 0644); err != nil {
+		t.Fatal(err)
+	}
+	uc, err := config.ParseUserConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uc.Repos
+}
+
 // setupStuckAgentRepo builds a read-write repo with a failing pre-commit
 // hook and an agent configured to fail (exit 1), plus a daemon watching it.
 // The first tick marks the repo stuck (hook_failed) and runs the failing
@@ -91,17 +108,7 @@ func setupStuckAgentRepo(t *testing.T) (repoDir, marker, hookPath, stateDir stri
 	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
 
 	marker = filepath.Join(t.TempDir(), "marker")
-	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
-	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(agentCfg), 0644); err != nil {
-		t.Fatal(err)
-	}
-	testGitOK(t, repoDir, "add", ".gittend")
-	testGitOK(t, repoDir, "commit", "-m", "agent config")
-	testGitOK(t, repoDir, "push", "-u", "origin", "main")
 
-	// Install the failing pre-commit hook only after committing the config,
-	// or the commit itself would trip it. It makes the daemon's commit
-	// attempt mark the repo stuck with reason hook_failed.
 	hookPath = filepath.Join(repoDir, ".git", "hooks", "pre-commit")
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
 		t.Fatal(err)
@@ -113,6 +120,9 @@ func setupStuckAgentRepo(t *testing.T) (repoDir, marker, hookPath, stateDir stri
 		ScanDepth:      2,
 		NetworkTimeout: "5s",
 	}
+	// The agent command is user-level only, so it goes into the daemon's
+	// user config, not the repo's .gittend.
+	cfg.Repos = agentEntry(t, repoDir, fmt.Sprintf("[repo.agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker))
 	stateDir = t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	d = New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
@@ -223,11 +233,9 @@ func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
 		t.Errorf("tick 1: agent budget = %d/%d, want 1/2", rs.AgentAttempts, rs.AgentMaxAttempts)
 	}
 
-	// The operator removes the agent from .gittend; the repo stays stuck.
-	noAgentCfg := "mode = \"read-write\"\ndebounce = \"0s\"\n"
-	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(noAgentCfg), 0644); err != nil {
-		t.Fatal(err)
-	}
+	// The operator removes the agent from the user config; the repo stays
+	// stuck.
+	d.userCfg.Repos = nil
 	d.rescanRoots()
 
 	// Tick 2: the repo is still stuck, but with the agent disabled the stale
@@ -241,6 +249,66 @@ func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
 	}
 	if rs2.AgentAttempts != 0 || rs2.AgentMaxAttempts != 0 {
 		t.Errorf("tick 2: agent budget = %d/%d, want 0/0 after agent disabled", rs2.AgentAttempts, rs2.AgentMaxAttempts)
+	}
+}
+
+// A repo that configures the agent in its own .gittend gets nothing: the
+// whole [agent] section is user-level only, so the daemon resolves no agent
+// config, never engages the agent, and the command never runs.
+func TestDaemonIgnoresGittendAgentSection(t *testing.T) {
+	tempRoot := t.TempDir()
+	remote := setupBareRemote(t)
+	repoDir := filepath.Join(tempRoot, "agent-repo")
+
+	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	// The repo tries to arm the agent itself. The daemon must ignore it.
+	gittend := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
+	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(gittend), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repoDir, "add", ".gittend")
+	testGitOK(t, repoDir, "commit", "-m", "agent config")
+	testGitOK(t, repoDir, "push", "-u", "origin", "main")
+
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// User config deliberately carries no [repo.agent] entry.
+	cfg := &config.UserConfig{
+		Roots:          []string{tempRoot},
+		Interval:       "1s",
+		ScanDepth:      2,
+		NetworkTimeout: "5s",
+	}
+	stateDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d.rescanRoots()
+
+	ctx := context.Background()
+	d.tick(ctx)
+
+	// The repo is stuck, but with no agent engaged.
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found after tick 1")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.CurrentState != "stuck" {
+		t.Fatalf("state = %s (%s), want stuck", rs.CurrentState, rs.LastError)
+	}
+	if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+		t.Errorf("agent budget = %d/%d, want 0/0 (the .gittend [agent] section is ignored)", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+
+	// Give a wrongly-started agent run time to write its marker.
+	time.Sleep(500 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("agent command ran although only the .gittend configured it")
 	}
 }
 
@@ -323,6 +391,7 @@ func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
 		ScanDepth:      2,
 		NetworkTimeout: "5s",
 	}
+	cfg.Repos = agentEntry(t, agentRepo, fmt.Sprintf("[repo.agent]\non_stuck_cmd = \"sleep 2; echo ran >> %s; exit 1\"\n", marker))
 	stateDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
@@ -669,12 +738,10 @@ func TestDaemonTickAgentDisabledMidRunKeepsBudgetCleared(t *testing.T) {
 	d.tick(ctx)
 
 	// Wait until the run holds the agent lock, then disable the agent while
-	// it is in flight.
+	// it is in flight: rescan with a user config that carries no [repo.agent]
+	// entry for the repo.
 	waitForAgentLockHeld(t, stateDir, repoDir)
-	noAgentCfg := "mode = \"read-write\"\ndebounce = \"0s\"\n"
-	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(noAgentCfg), 0644); err != nil {
-		t.Fatal(err)
-	}
+	d.userCfg.Repos = nil
 	d.rescanRoots()
 
 	// The next tick runs the disabled-agent clear path (0/0) while the run
