@@ -186,12 +186,15 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 	}
 
 	entries := make([]RepoEntry, 0, len(raw.Repos))
-	for _, t := range raw.Repos {
+	for i, t := range raw.Repos {
 		table, ok := t.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("repo entry missing path")
+			return nil, fmt.Errorf("repo entry %d: not a table", i+1)
 		}
 		p, _ := table["path"].(string)
+		if p == "" {
+			return nil, fmt.Errorf("repo entry %d: path must be a non-empty string", i+1)
+		}
 		delete(table, "path")
 		entries = append(entries, RepoEntry{Path: p, Raw: table})
 	}

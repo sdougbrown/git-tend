@@ -191,9 +191,16 @@ sync_branch = "dev"
 }
 
 func TestParseUserConfigRepoEntryMissingPath(t *testing.T) {
-	_, err := ParseUserConfig(writeConfig(t, "[[repo]]\nmode = \"read-only\"\n"))
-	if err == nil || !strings.Contains(err.Error(), "missing path") {
-		t.Errorf("expected missing-path error, got: %v", err)
+	_, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"~/a\"\n\n[[repo]]\nmode = \"read-only\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "repo entry 2: path must be a non-empty string") {
+		t.Errorf("expected missing-path error naming entry 2, got: %v", err)
+	}
+}
+
+func TestParseUserConfigRepoEntryNotTable(t *testing.T) {
+	_, err := ParseUserConfig(writeConfig(t, "repo = [1, 2]\n"))
+	if err == nil || !strings.Contains(err.Error(), "repo entry 1: not a table") {
+		t.Errorf("expected not-a-table error naming entry 1, got: %v", err)
 	}
 }
 
@@ -371,8 +378,9 @@ func TestResolveUserEntryModelCmdHonored(t *testing.T) {
 
 func TestResolveInvalidGittendValue(t *testing.T) {
 	gittend := writeConfig(t, "mode = \"bogus\"\n")
-	if _, err := Resolve(gittend, nil, "/tmp/repo"); err == nil {
-		t.Error("expected error for invalid mode")
+	_, err := Resolve(gittend, nil, "/tmp/repo")
+	if err == nil || !strings.Contains(err.Error(), "invalid mode") {
+		t.Errorf("expected invalid mode error, got: %v", err)
 	}
 }
 
