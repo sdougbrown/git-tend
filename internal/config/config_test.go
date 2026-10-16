@@ -454,3 +454,214 @@ func TestResolveUserArrayReplacesGittend(t *testing.T) {
 		t.Errorf("Include.Paths = %v, want [a b] (kept from .gittend)", cfg.Include.Paths)
 	}
 }
+
+func TestResolveGittendAgentIgnoredWithWarning(t *testing.T) {
+	// The whole [agent] table is user-level only, and go-toml matches struct
+	// fields case-insensitively, so every spelling of the table and of its
+	// keys must still be caught by the strip.
+	tests := []struct {
+		name    string
+		gittend string
+		// user, when set, is a [[repo]] entry body that enables the agent.
+		user string
+	}{
+		{name: "plain", gittend: "[agent]\non_stuck_cmd = \"evil\"\n"},
+		{name: "uppercase table", gittend: "[AGENT]\non_stuck_cmd = \"evil\"\n"},
+		{name: "uppercase key", gittend: "[agent]\nON_STUCK_CMD = \"evil\"\n"},
+		{name: "inline table", gittend: "agent = { On_Stuck_Cmd = \"evil\" }\n"},
+		{name: "non-string key only", gittend: "[agent]\nmax_attempts = 5\n"},
+		{
+			name:    "allowed_reasons only with user command",
+			gittend: "[agent]\nallowed_reasons = [\"rebase_conflict\"]\n",
+			user:    "[repo.agent]\non_stuck_cmd = \"true\"\n",
+		},
+		{
+			name:    "timeout only with user command",
+			gittend: "[agent]\ntimeout = \"1h\"\n",
+			user:    "[repo.agent]\non_stuck_cmd = \"true\"\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var warnings []string
+			origWarn := warnf
+			warnf = func(format string, args ...interface{}) {
+				warnings = append(warnings, fmt.Sprintf(format, args...))
+			}
+			defer func() { warnf = origWarn }()
+
+			var entry *RepoEntry
+			if tt.user != "" {
+				entry = entryFrom(t, tt.user)
+			}
+			cfg, err := Resolve(writeConfig(t, tt.gittend), entry, "/tmp/repo")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Agent.Enabled() != (tt.user != "") {
+				t.Errorf("agent Enabled() = %v, want %v: %+v", cfg.Agent.Enabled(), tt.user != "", cfg.Agent)
+			}
+			if cfg.Agent.MaxAttempts != 2 || cfg.Agent.Timeout != "10m" {
+				t.Errorf("agent defaults not applied: %+v", cfg.Agent)
+			}
+			if cfg.Agent.AllowsReason("rebase_conflict") {
+				t.Error("rebase_conflict from .gittend must not reach the allowlist")
+			}
+			if cfg.Agent.Timeout == "1h" {
+				t.Error("timeout from .gittend must not reach the resolved agent")
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], "/tmp/repo") || !strings.Contains(warnings[0], "agent") {
+				t.Errorf("expected warning naming repo and key, got: %v", warnings)
+			}
+		})
+	}
+}
+
+func TestParseAgentConfig(t *testing.T) {
+	t.Run("defaults when agent disabled", func(t *testing.T) {
+		cfg, err := Resolve(writeConfig(t, "mode = \"read-only\"\n"), nil, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.Enabled() {
+			t.Error("agent should be disabled without on_stuck_cmd")
+		}
+		if cfg.Agent.MaxAttempts != 2 {
+			t.Errorf("MaxAttempts = %d, want default 2", cfg.Agent.MaxAttempts)
+		}
+		if cfg.Agent.Timeout != "10m" {
+			t.Errorf("Timeout = %q, want default 10m", cfg.Agent.Timeout)
+		}
+		if !cfg.Agent.AllowsReason("hook_failed") {
+			t.Error("default allowlist should include hook_failed")
+		}
+		if cfg.Agent.AllowsReason("rebase_conflict") {
+			t.Error("default allowlist should exclude rebase_conflict")
+		}
+	})
+
+	t.Run("invalid timeout", func(t *testing.T) {
+		_, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\n[repo.agent]\non_stuck_cmd = \"true\"\ntimeout = \"bogus\"\n"))
+		if err == nil || !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("expected timeout error, got: %v", err)
+		}
+	})
+
+	t.Run("explicit timeout kept", func(t *testing.T) {
+		entry := entryFrom(t, "[repo.agent]\non_stuck_cmd = \"true\"\ntimeout = \"5m\"\n")
+		cfg, err := Resolve(writeConfig(t, ""), entry, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.Timeout != "5m" {
+			t.Errorf("Timeout = %q, want 5m", cfg.Agent.Timeout)
+		}
+	})
+
+	t.Run("negative max_attempts", func(t *testing.T) {
+		_, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\n[repo.agent]\non_stuck_cmd = \"true\"\nmax_attempts = -1\n"))
+		if err == nil || !strings.Contains(err.Error(), "max_attempts") {
+			t.Fatalf("expected max_attempts error, got: %v", err)
+		}
+	})
+
+	t.Run("zero max_attempts rejected", func(t *testing.T) {
+		_, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\n[repo.agent]\non_stuck_cmd = \"true\"\nmax_attempts = 0\n"))
+		if err == nil || !strings.Contains(err.Error(), "max_attempts") {
+			t.Fatalf("expected max_attempts error, got: %v", err)
+		}
+	})
+
+	t.Run("omitted max_attempts defaults to 2", func(t *testing.T) {
+		entry := entryFrom(t, "[repo.agent]\non_stuck_cmd = \"true\"\n")
+		cfg, err := Resolve(writeConfig(t, ""), entry, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.MaxAttempts != 2 {
+			t.Errorf("MaxAttempts = %d, want default 2", cfg.Agent.MaxAttempts)
+		}
+	})
+
+	t.Run("explicit max_attempts kept", func(t *testing.T) {
+		entry := entryFrom(t, "[repo.agent]\non_stuck_cmd = \"true\"\nmax_attempts = 3\n")
+		cfg, err := Resolve(writeConfig(t, ""), entry, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.MaxAttempts != 3 {
+			t.Errorf("MaxAttempts = %d, want 3", cfg.Agent.MaxAttempts)
+		}
+	})
+
+	t.Run("unknown allowed_reason", func(t *testing.T) {
+		_, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\n[repo.agent]\non_stuck_cmd = \"true\"\nallowed_reasons = [\"bogus\"]\n"))
+		if err == nil || !strings.Contains(err.Error(), "allowed_reason") {
+			t.Fatalf("expected allowed_reason error, got: %v", err)
+		}
+	})
+
+	t.Run("explicit allowlist respected", func(t *testing.T) {
+		entry := entryFrom(t, "[repo.agent]\non_stuck_cmd = \"true\"\nallowed_reasons = [\"rebase_conflict\"]\n")
+		cfg, err := Resolve(writeConfig(t, ""), entry, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.Agent.AllowsReason("rebase_conflict") {
+			t.Error("explicit allowlist should permit rebase_conflict")
+		}
+		if cfg.Agent.AllowsReason("hook_failed") {
+			t.Error("explicit allowlist should exclude hook_failed")
+		}
+	})
+
+	t.Run("uppercase table and key max_attempts kept", func(t *testing.T) {
+		entry := entryFrom(t, "[repo.AGENT]\non_stuck_cmd = \"true\"\nMAX_ATTEMPTS = 5\n")
+		cfg, err := Resolve(writeConfig(t, ""), entry, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.MaxAttempts != 5 {
+			t.Errorf("MaxAttempts = %d, want 5", cfg.Agent.MaxAttempts)
+		}
+	})
+
+	t.Run("uppercase table and key zero max_attempts rejected", func(t *testing.T) {
+		_, err := ParseUserConfig(writeConfig(t, "[[repo]]\npath = \"/tmp/repo\"\n[repo.AGENT]\non_stuck_cmd = \"true\"\nMAX_ATTEMPTS = 0\n"))
+		if err == nil || !strings.Contains(err.Error(), "max_attempts") {
+			t.Fatalf("expected max_attempts error, got: %v", err)
+		}
+	})
+}
+
+func TestParseUserConfigDuplicateEntriesMergeAgent(t *testing.T) {
+	data := `
+[[repo]]
+path = "/tmp/repo"
+[repo.agent]
+max_attempts = 4
+
+[[repo]]
+path = "/tmp/repo"
+[repo.agent]
+on_stuck_cmd = "true"
+`
+	cfg, err := ParseUserConfig(writeConfig(t, data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("expected duplicate entries to collapse, got %d", len(cfg.Repos))
+	}
+	resolved, err := Resolve("", &cfg.Repos[0], "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved.Agent.OnStuckCmd != "true" {
+		t.Errorf("OnStuckCmd = %q, want true (later entry)", resolved.Agent.OnStuckCmd)
+	}
+	if resolved.Agent.MaxAttempts != 4 {
+		t.Errorf("MaxAttempts = %d, want 4 (earlier entry kept)", resolved.Agent.MaxAttempts)
+	}
+}

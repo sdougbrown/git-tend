@@ -10,6 +10,7 @@ import (
 	"github.com/sdougbrown/git-tend/internal/git"
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
+	gitSync "github.com/sdougbrown/git-tend/internal/sync"
 )
 
 var unstickAll bool
@@ -69,6 +70,16 @@ func removeStuckFlag(repoPath string) error {
 		return fmt.Errorf("not a git repository: %s", repoPath)
 	}
 
+	// Hold the agent lock around the whole removal: an in-flight agent run
+	// holds the same lock and writes the attempt record at its end, and
+	// deleting state underneath it would race that write.
+	stateDir := paths.StateDir()
+	lock, err := gitSync.AcquireAgentLock(stateDir, repoPath)
+	if err != nil {
+		return fmt.Errorf("agent run in flight for %s; retry after it finishes: %w", repoPath, err)
+	}
+	defer lock.Close()
+
 	stuckPath := filepath.Join(repoPath, ".gittend.stuck")
 	err = os.Remove(stuckPath)
 	if err != nil {
@@ -77,6 +88,17 @@ func removeStuckFlag(repoPath string) error {
 			return nil
 		}
 		return fmt.Errorf("removing stuck flag: %w", err)
+	}
+
+	// Reset the agent attempt counter and the daemon-issued stuck record so a
+	// fresh stuck episode starts with a full budget of attempts.
+	for _, path := range []string{
+		gitSync.AgentStatePath(stateDir, repoPath),
+		gitSync.StuckRecordPath(stateDir, repoPath),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("resetting agent state: %w", err)
+		}
 	}
 
 	fmt.Printf("unstuck %s\n", repoPath)

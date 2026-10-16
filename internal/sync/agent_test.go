@@ -1,0 +1,1096 @@
+package sync
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pelletier/go-toml/v2"
+
+	"github.com/sdougbrown/git-tend/internal/config"
+	"golang.org/x/sys/unix"
+)
+
+// writeStuckState mimics a daemon-observed stuck transition: it writes both
+// the repo-local flag and the matching daemon-issued provenance record.
+func writeStuckState(t *testing.T, stateDir, repoPath, reason string) {
+	t.Helper()
+	if err := writeStuck(stateDir, repoPath, reason, "git commit", 1, "hook blew up\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitForAgentLock blocks until the in-flight RunStuckAgent holds the
+// per-repo agent lock, proven by a non-blocking flock probe on a
+// separately-opened fd failing with EWOULDBLOCK/EAGAIN. A fixed sleep
+// races: if the agent hasn't reached the lock yet, the test proceeds too
+// early. If the probe succeeds, the agent hasn't locked yet — retry.
+func waitForAgentLock(t *testing.T, stateDir, repoPath string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		f.Close()
+		if err != nil && (errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the agent to acquire the run lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// writeForgedStuckFile writes only the repo-local flag, without a matching
+// daemon-issued record — what a malicious repo could do on its own.
+func writeForgedStuckFile(t *testing.T, repoPath, reason string) {
+	t.Helper()
+	content := "stuck_at = \"2026-01-01T00:00:00Z\"\n" +
+		"reason = \"" + reason + "\"\n" +
+		"last_command = \"git commit\"\n" +
+		"last_exit_code = 1\n" +
+		"last_output = \"\"\"\nhook blew up\n\"\"\"\n"
+	if err := os.WriteFile(filepath.Join(repoPath, ".gittend.stuck"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rewriteStuckReason rewrites the reason in the repo-local flag, leaving the
+// daemon-issued record (and its stuck_at) untouched.
+func rewriteStuckReason(t *testing.T, repoPath, reason string) {
+	t.Helper()
+	path := filepath.Join(repoPath, ".gittend.stuck")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	lines[1] = "reason = \"" + reason + "\""
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rewriteStuckAt rewrites the stuck_at in the repo-local flag, leaving the
+// daemon-issued record untouched — a flag whose nonce no longer matches any
+// daemon-issued record.
+func rewriteStuckAt(t *testing.T, repoPath, stuckAt string) {
+	t.Helper()
+	path := filepath.Join(repoPath, ".gittend.stuck")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	lines[0] = "stuck_at = \"" + stuckAt + "\""
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func agentTestConfig(cmd string, allowedReasons []string, maxAttempts int, timeout string) *config.Config {
+	return &config.Config{
+		Mode:       "read-only",
+		SyncBranch: "main",
+		Agent: config.AgentConfig{
+			OnStuckCmd:     cmd,
+			AllowedReasons: allowedReasons,
+			MaxAttempts:    maxAttempts,
+			Timeout:        timeout,
+		},
+	}
+}
+
+// markerCmd returns a command that appends "ran" to markerPath and exits with
+// the given code, so tests can observe whether and how often it ran.
+func markerCmd(markerPath string, code int) string {
+	return "echo ran >> " + markerPath + "; exit " + strconv.Itoa(code)
+}
+
+func markerRuns(t *testing.T, markerPath string) int {
+	t.Helper()
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return 0
+	}
+	return len(strings.Split(strings.TrimRight(string(data), "\n"), "\n"))
+}
+
+func TestAgentAllowlistFiltering(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	// Default allowlist: rebase_conflict excluded, hook_failed included.
+	writeStuckState(t, stateDir, repo, "rebase_conflict")
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run for rebase_conflict under the default allowlist")
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("agent command should not have executed")
+	}
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if !res.Ran || !res.Recovered {
+		t.Fatalf("expected run+recovery for hook_failed, got ran=%v recovered=%v err=%v", res.Ran, res.Recovered, res.Err)
+	}
+
+	// A forged reason in the file doesn't matter: the allowlist applies to the
+	// reason the daemon observed (rebase_conflict in the record), so a file
+	// claiming hook_failed can't smuggle a rebase_conflict episode past it.
+	writeStuckState(t, stateDir, repo, "rebase_conflict")
+	rewriteStuckReason(t, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run when the daemon-observed reason is not allowed, regardless of the file's reason")
+	}
+
+	// A forged stuck file with no matching daemon-issued record never runs
+	// the agent, whatever reason it claims.
+	writeForgedStuckFile(t, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run for a forged stuck file with no daemon-issued record")
+	}
+
+	// Explicit allowlist: only push_rejected.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), []string{"push_rejected"}, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run when reason is not in the explicit allowlist")
+	}
+
+	// Agent not configured: nothing runs.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, &config.Config{Mode: "read-only", SyncBranch: "main"}, stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run without on_stuck_cmd")
+	}
+}
+
+func TestCorruptAttemptRecordFailsClosed(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	recordPath := AgentStatePath(stateDir, repo)
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unparseable state must not re-arm the agent from an effectively-fresh
+	// counter; the budget is treated as spent until the record is cleared.
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent must not run from an unparseable attempt record")
+	}
+	if res.MaxAttempts != 2 || res.Attempts != 2 {
+		t.Errorf("got MaxAttempts=%d Attempts=%d, want budget reported as spent (2/2)", res.MaxAttempts, res.Attempts)
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("agent command should not have executed")
+	}
+}
+
+// A corrupt attempt record must fail closed even when the agent lock is
+// contended: the contended path reads the record to report the budget, and an
+// unparseable record must surface as a spent budget, not a fresh one.
+func TestCorruptAttemptRecordFailsClosedWhenLockHeld(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	recordPath := AgentStatePath(stateDir, repo)
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the agent lock so RunStuckAgent takes the contended path.
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent must not run when the lock is held")
+	}
+	if res.Attempts != 2 {
+		t.Errorf("Attempts = %d, want 2 (fail-closed on a corrupt record)", res.Attempts)
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("agent command should not have executed")
+	}
+}
+
+func TestAgentMaxAttemptsOnlyWhenEngaged(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	cfg := agentTestConfig(markerCmd(marker, 0), nil, 2, "10s")
+
+	// Agent configured but no stuck file: not engaged, no budget to show.
+	if res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil); res.MaxAttempts != 0 {
+		t.Errorf("MaxAttempts = %d with no stuck file, want 0", res.MaxAttempts)
+	}
+
+	// Stuck, but the daemon-observed reason is not allowed: not engaged.
+	writeStuckState(t, stateDir, repo, "rebase_conflict")
+	if res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil); res.MaxAttempts != 0 {
+		t.Errorf("MaxAttempts = %d for a never-allowed reason, want 0", res.MaxAttempts)
+	}
+
+	// Engaged: the budget is reported, and the first attempt is spent.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if res.MaxAttempts != 2 || res.Attempts != 1 {
+		t.Errorf("got MaxAttempts=%d Attempts=%d, want 2/1", res.MaxAttempts, res.Attempts)
+	}
+}
+
+func TestOversizedStuckFileIsIgnored(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	// A repo-controlled stuck file larger than the read cap must be treated as
+	// unreadable, not slurped into memory whole.
+	big := make([]byte, 2<<20)
+	for i := range big {
+		big[i] = 'a'
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), big, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run off an oversized stuck file")
+	}
+
+	// Same cap for a file that would parse if a truncated prefix were read:
+	// a valid stuck_at plus padding past the cap must still be refused.
+	padded := `stuck_at = "2026-01-01T00:00:00Z"
+reason = "hook_failed"
+last_output = """
+` + strings.Repeat("a", 2<<20) + `"""
+`
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), []byte(padded), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run off an oversized but parseable stuck file")
+	}
+}
+
+func TestAgentExitZeroRecovers(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	// The clone of an empty remote has an unborn HEAD; commit the .gittend
+	// file so the repo is on main and syncable.
+	writeTestConfig(t, repo, "read-only", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "-u", "origin", "main")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	// Pre-spend an attempt so the recovery path's persistence is observable:
+	// an exit-0 recovery keeps (and increments) the attempt record rather
+	// than resetting the budget — only a successful sync or unstick clears it.
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 1), nil, 2, "10s"), stateDir, nil)
+	if !res.Ran || res.Recovered || res.Attempts != 1 {
+		t.Fatalf("expected a failed pre-spending run, got ran=%v recovered=%v attempts=%d", res.Ran, res.Recovered, res.Attempts)
+	}
+
+	res = RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if !res.Recovered {
+		t.Fatalf("expected recovery, got ran=%v recovered=%v err=%v", res.Ran, res.Recovered, res.Err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); !os.IsNotExist(err) {
+		t.Error("stuck flag should be removed on exit 0")
+	}
+	if _, err := os.Stat(AgentStatePath(stateDir, repo)); err != nil {
+		t.Fatal("attempt record should survive recovery (budget is not re-armed)")
+	}
+	data, err := os.ReadFile(AgentStatePath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var att agentAttempt
+	if err := json.Unmarshal(data, &att); err != nil {
+		t.Fatal(err)
+	}
+	if att.Attempts != 2 {
+		t.Errorf("attempt record has Attempts=%d after recovery, want 2 (increment persisted)", att.Attempts)
+	}
+	if _, err := os.Stat(StuckRecordPath(stateDir, repo)); !os.IsNotExist(err) {
+		t.Error("provenance record should be removed on recovery")
+	}
+
+	// Recovery means the next sync proceeds and actually succeeds — a TempDir
+	// would fail at CurrentBranch and make this assertion vacuously pass.
+	cfg := &config.Config{Mode: "read-only", SyncBranch: "main"}
+	if result := Sync(context.Background(), repo, cfg, stateDir); result.State != "ok" {
+		t.Errorf("sync after agent recovery: got %s (%s), want ok", result.State, result.Error)
+	}
+}
+
+func TestAgentAttemptCap(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig(markerCmd(marker, 1), nil, 2, "10s")
+
+	for i := 1; i <= 2; i++ {
+		res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+		if !res.Ran {
+			t.Fatalf("run %d: expected agent to run", i)
+		}
+		if res.Recovered {
+			t.Fatalf("run %d: command exits 1, should not recover", i)
+		}
+		if res.Attempts != i {
+			t.Fatalf("run %d: Attempts = %d, want %d", i, res.Attempts, i)
+		}
+		if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
+			t.Fatalf("run %d: stuck flag should remain after failure", i)
+		}
+	}
+
+	// Cap reached: no further runs, repo waits for a human.
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent should not run once max_attempts is reached")
+	}
+	if runs := markerRuns(t, marker); runs != 2 {
+		t.Errorf("command ran %d times, want 2", runs)
+	}
+
+	// A new episode (a fresh daemon-issued record) does NOT reset the counter:
+	// the budget is per repo, and only a successful sync or a human unstick
+	// clears it. Otherwise an agent that recovers without fixing anything
+	// would re-arm itself on every failed sync.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if res.Ran {
+		t.Fatal("a fresh stuck episode should not re-arm a spent budget")
+	}
+	if runs := markerRuns(t, marker); runs != 2 {
+		t.Errorf("command ran %d times, want 2", runs)
+	}
+
+	// A successful sync is what resets the budget (the flag is gone by then,
+	// so the repo actually recovers).
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	syncable := gitClone(t, remote)
+	defer os.RemoveAll(syncable)
+	writeTestConfig(t, syncable, "read-only", "main", "", nil, nil)
+	testGitOK(t, syncable, "add", ".gittend")
+	testGitOK(t, syncable, "commit", "-m", "initial config")
+	testGitOK(t, syncable, "push", "-u", "origin", "main")
+
+	writeStuckState(t, stateDir, syncable, "hook_failed")
+	res = RunStuckAgent(context.Background(), syncable, cfg, stateDir, nil)
+	if !res.Ran || res.Recovered || res.Attempts != 1 {
+		t.Fatalf("expected failed run on the syncable repo, got ran=%v recovered=%v attempts=%d", res.Ran, res.Recovered, res.Attempts)
+	}
+	if _, err := os.Stat(AgentStatePath(stateDir, syncable)); err != nil {
+		t.Fatal("attempt record should exist before the successful sync")
+	}
+
+	// Fail-then-succeed in one episode: the recovery keeps the record (only
+	// the flag and the provenance record are cleared), and the record is
+	// finally removed by the successful sync that follows.
+	cfgOK := agentTestConfig("exit 0", nil, 2, "10s")
+	res = RunStuckAgent(context.Background(), syncable, cfgOK, stateDir, nil)
+	if !res.Ran || !res.Recovered || res.Attempts != 2 {
+		t.Fatalf("expected successful recovery, got ran=%v recovered=%v attempts=%d", res.Ran, res.Recovered, res.Attempts)
+	}
+	if _, err := os.Stat(AgentStatePath(stateDir, syncable)); err != nil {
+		t.Fatal("recovery should keep the attempt record (budget is not re-armed)")
+	}
+	if result := Sync(context.Background(), syncable, &config.Config{Mode: "read-only", SyncBranch: "main"}, stateDir); result.State != "ok" {
+		t.Fatalf("sync: got %s (%s), want ok", result.State, result.Error)
+	}
+	if _, err := os.Stat(AgentStatePath(stateDir, syncable)); !os.IsNotExist(err) {
+		t.Error("a successful sync should reset the attempt record")
+	}
+	writeStuckState(t, stateDir, syncable, "hook_failed")
+	res = RunStuckAgent(context.Background(), syncable, cfgOK, stateDir, nil)
+	if !res.Ran || res.Attempts != 1 {
+		t.Fatalf("expected a fresh budget after a successful sync, got ran=%v attempts=%d", res.Ran, res.Attempts)
+	}
+}
+
+func TestAgentTimeout(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig("sleep 30", nil, 2, "100ms")
+
+	start := time.Now()
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran {
+		t.Fatal("expected agent to run")
+	}
+	if res.Recovered {
+		t.Fatal("timed-out command must not count as recovery")
+	}
+	if res.Err == nil {
+		t.Error("timed-out command should report an error")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("timeout not enforced, took %s", elapsed)
+	}
+	if res.Attempts != 1 {
+		t.Errorf("Attempts = %d, want 1 after timeout", res.Attempts)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Error("stuck flag should remain after timeout")
+	}
+}
+
+func TestAgentTimeoutKillsProcessGroup(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	// The command runs under `sh -c`, so the sleep (and the marker write) is
+	// a direct child of the shell, not of the daemon. A timeout that kills
+	// only the sh wrapper would leave that child running; a process-group
+	// kill must not.
+	cfg := agentTestConfig("sleep 1; echo ran >> "+marker, nil, 2, "100ms")
+
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran {
+		t.Fatal("expected agent to run")
+	}
+	if res.Recovered {
+		t.Fatal("timed-out command must not count as recovery")
+	}
+
+	// Poll for the marker: a surviving orphan writes it after its sleep.
+	// If it appears within the window, the process group was not killed.
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if markerRuns(t, marker) != 0 {
+			t.Fatal("shell's child survived the timeout; process group was not killed")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// A second RunStuckAgent must not start while one is already in flight for
+// the same repo — otherwise a daemon restart could run two agents
+// concurrently on the same working tree.
+func TestAgentRunLockSerializes(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig("sleep 1; exit 1", nil, 5, "10s")
+
+	done := make(chan AgentRunResult, 1)
+	go func() {
+		done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	}()
+	waitForAgentLock(t, stateDir, repo)
+
+	cfgB := agentTestConfig(markerCmd(marker, 0), nil, 5, "10s")
+	res := RunStuckAgent(context.Background(), repo, cfgB, stateDir, nil)
+	if res.Ran {
+		t.Error("second agent run should not start while the first holds the lock")
+	}
+	// Blocked: the run did not start, so the agent is not engaged and no
+	// budget is reported — the provenance check happens under the lock, which
+	// the in-flight run holds.
+	if res.MaxAttempts != 0 {
+		t.Errorf("blocked run: MaxAttempts = %d, want 0 (not engaged)", res.MaxAttempts)
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("second agent command should not have executed")
+	}
+
+	first := <-done
+	if !first.Ran {
+		t.Fatal("expected the first agent run to proceed")
+	}
+
+	// Once the lock is released, the next run goes through.
+	res = RunStuckAgent(context.Background(), repo, cfgB, stateDir, nil)
+	if !res.Ran || !res.Recovered {
+		t.Fatalf("expected run+recovery after lock release, got ran=%v recovered=%v err=%v", res.Ran, res.Recovered, res.Err)
+	}
+}
+
+// The agent run must not hold the per-repo flock: while it runs, another sync
+// must be able to acquire the lock. The sync still skips on the stuck flag,
+// but only after taking the lock — "locked" would mean the agent held it.
+func TestAgentDoesNotHoldSyncLock(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-only", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+
+	stateDir := t.TempDir()
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig("sleep 2; exit 1", nil, 2, "10s")
+
+	done := make(chan AgentRunResult, 1)
+	go func() {
+		done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	}()
+
+	// Wait until the agent holds the run lock before checking the sync lock.
+	waitForAgentLock(t, stateDir, repo)
+
+	cfgSync := &config.Config{Mode: "read-only", SyncBranch: "main"}
+	result := Sync(context.Background(), repo, cfgSync, stateDir)
+	if result.State == "skipped" && result.Error == "locked" {
+		t.Error("sync could not acquire the flock while the agent run was in flight")
+	}
+	if result.State != "skipped" || result.Error != "stuck flag exists" {
+		t.Fatalf("expected skipped (stuck flag exists), got %s: %s", result.State, result.Error)
+	}
+
+	res := <-done
+	if res.Recovered {
+		t.Error("sleep command should not count as recovery")
+	}
+}
+
+func parseAgentContext(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	var ctx map[string]any
+	if err := toml.Unmarshal(data, &ctx); err != nil {
+		t.Fatalf("parsing agent context: %v\n%s", err, data)
+	}
+	return ctx
+}
+
+func TestAgentContextOnStdin(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	stdinFile := filepath.Join(t.TempDir(), "stdin")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	rec, err := readStuckRecord(StuckRecordPath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := agentTestConfig("cat > "+stdinFile, nil, 2, "10s")
+
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Recovered {
+		t.Fatalf("expected recovery, got err=%v", res.Err)
+	}
+
+	data, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := parseAgentContext(t, data)
+	want := map[string]any{
+		"repo":           repo,
+		"sync_branch":    "main",
+		"reason":         "hook_failed",
+		"stuck_at":       rec.StuckAt,
+		"last_command":   "git commit",
+		"last_exit_code": int64(1),
+		"last_output":    "hook blew up\n",
+	}
+	for key, wantVal := range want {
+		if got := ctx[key]; got != wantVal {
+			t.Errorf("stdin context %s = %v, want %v", key, got, wantVal)
+		}
+	}
+}
+
+// The context carries the daemon-observed reason, not the file's: a
+// rewritten reason line passes provenance (stuck_at matches) but must not
+// tell the agent a different failure class.
+func TestAgentContextCarriesDaemonObservedReason(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	stdinFile := filepath.Join(t.TempDir(), "stdin")
+
+	// The daemon observed hook_failed; the record is authoritative.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	// Forge the file's reason to a different value.
+	rewriteStuckReason(t, repo, "push_rejected")
+	cfg := agentTestConfig("cat > "+stdinFile, nil, 2, "10s")
+
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran {
+		t.Fatalf("expected the agent to run (hook_failed is allowed), got ran=%v err=%v", res.Ran, res.Err)
+	}
+
+	data, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := parseAgentContext(t, data)
+	if ctx["reason"] != "hook_failed" {
+		t.Errorf("stdin context should carry the daemon-observed reason hook_failed, got: %v", ctx["reason"])
+	}
+}
+
+// An exit-0 recovery persists the incremented attempt counter, so a new
+// stuck episode right after continues the same budget: attempt 2 of 2 runs,
+// then the cap is exhausted. Without the persisted increment the agent would
+// re-arm a full budget on every episode.
+func TestAgentBudgetCarriesOverAfterExitZeroRecovery(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	cfg := agentTestConfig(markerCmd(marker, 0), nil, 2, "10s")
+
+	// Episode 1: the agent "recovers" (exit 0) without fixing anything.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran || !res.Recovered || res.Attempts != 1 {
+		t.Fatalf("episode 1: got ran=%v recovered=%v attempts=%d, want run+recovery at attempt 1", res.Ran, res.Recovered, res.Attempts)
+	}
+
+	// Episode 2: a fresh flag + record; the budget must carry over, so this
+	// is attempt 2 of 2 (and it exits 0, so it "recovers" again).
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran || !res.Recovered || res.Attempts != 2 {
+		t.Fatalf("episode 2: got ran=%v recovered=%v attempts=%d, want run at attempt 2 of 2", res.Ran, res.Recovered, res.Attempts)
+	}
+
+	// Budget exhausted: no further runs, whatever the episode.
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	res = RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if res.Ran {
+		t.Fatal("episode 3: agent should not run once the carried-over budget is spent")
+	}
+	if runs := markerRuns(t, marker); runs != 2 {
+		t.Errorf("command ran %d times, want 2", runs)
+	}
+}
+
+// A flag whose stuck_at doesn't match the daemon-issued record must not run
+// the agent, even though a record exists — the provenance match is per
+// episode, not just record-presence.
+func TestStuckRecordMismatchDoesNotRun(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	rewriteStuckAt(t, repo, "2000-01-01T00:00:00Z")
+
+	res := RunStuckAgent(context.Background(), repo, agentTestConfig(markerCmd(marker, 0), nil, 2, "10s"), stateDir, nil)
+	if res.Ran {
+		t.Fatal("agent must not run when the flag's stuck_at mismatches the record")
+	}
+	if markerRuns(t, marker) != 0 {
+		t.Error("agent command should not have executed")
+	}
+}
+
+// writeStuck refuses to create the stuck flag through a symlink: the path is
+// repo-controlled, and following it would write repo-influenced content to an
+// arbitrary target.
+func TestWriteStuckRefusesSymlinkedFlag(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err == nil {
+		t.Fatal("writeStuck must refuse a symlinked stuck path")
+	}
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "keep" {
+		t.Errorf("wrote through the symlink: victim now holds %q", data)
+	}
+}
+
+// writeStuck takes the agent lock, so a write racing an in-flight agent run
+// fails instead of interleaving with that run's record/flag cleanup.
+func TestWriteStuckRefusesWhileAgentLockHeld(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err == nil {
+		t.Error("writeStuck must fail while the agent lock is held elsewhere")
+	}
+	lock.Close()
+
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err != nil {
+		t.Errorf("writeStuck should succeed once the lock is released: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Error("stuck flag should exist after a successful writeStuck")
+	}
+}
+
+// A writeStuck racing an in-flight agent run (which holds the agent lock)
+// must fail and leave the existing flag and provenance record intact — it
+// must not overwrite them with a fresh episode that the run's cleanup would
+// then mis-delete.
+func TestWriteStuckRefusesAndLeavesFilesIntactWhileAgentLockHeld(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	// Write the initial flag + record (episode 1).
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	flagBefore, err := os.ReadFile(filepath.Join(repo, ".gittend.stuck"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordBefore, err := os.ReadFile(StuckRecordPath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the agent lock (simulating an in-flight agent run).
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	// A concurrent writeStuck must fail.
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, "boom2"); err == nil {
+		t.Fatal("writeStuck must fail while the agent lock is held")
+	}
+
+	// The existing flag and record must be left intact.
+	flagAfter, err := os.ReadFile(filepath.Join(repo, ".gittend.stuck"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(flagAfter) != string(flagBefore) {
+		t.Error("writeStuck modified the existing flag while the lock was held")
+	}
+	recordAfter, err := os.ReadFile(StuckRecordPath(stateDir, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(recordAfter) != string(recordBefore) {
+		t.Error("writeStuck modified the existing record while the lock was held")
+	}
+}
+
+// writeStuck must escape repo-influenced output that is hostile to TOML
+// (triple quotes, backslashes, quotes) so the flag file still parses and the
+// agent can run for that episode.
+func TestWriteStuckEscapesTOMLHostileOutput(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	hostile := `{
+  "error": "bad ref",
+  "detail": "a\"b \\ backslash \"\"\"",
+  "raw": "\"\"\""
+}
+`
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, hostile); err != nil {
+		t.Fatal(err)
+	}
+
+	// The flag file must parse as TOML.
+	sf, err := readStuckFile(repo)
+	if err != nil {
+		t.Fatalf("readStuckFile: %v", err)
+	}
+
+	// The output must round-trip exactly.
+	if sf.LastOutput != hostile {
+		t.Errorf("LastOutput = %q, want %q", sf.LastOutput, hostile)
+	}
+	// The other fields must survive too.
+	if sf.Reason != "hook_failed" {
+		t.Errorf("Reason = %q, want hook_failed", sf.Reason)
+	}
+	if sf.LastCommand != "git commit" {
+		t.Errorf("LastCommand = %q, want git commit", sf.LastCommand)
+	}
+	if sf.LastExitCode != 1 {
+		t.Errorf("LastExitCode = %d, want 1", sf.LastExitCode)
+	}
+	if sf.StuckAt == "" {
+		t.Error("StuckAt should be set")
+	}
+}
+
+// removeStuckFlagIfCurrent is the compare-and-delete the recovery path uses
+// to clear the flag: it deletes only when the flag's stuck_at still matches
+// the verified record, so a flag that no longer belongs to the episode is
+// left in place.
+func TestRemoveStuckFlagIfCurrent(t *testing.T) {
+	repo := t.TempDir()
+	flagPath := filepath.Join(repo, ".gittend.stuck")
+
+	// Matching stuck_at: the flag is deleted.
+	if err := os.WriteFile(flagPath, []byte("stuck_at = \"X\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStuckFlagIfCurrent(repo, "X"); err != nil {
+		t.Fatalf("removeStuckFlagIfCurrent: %v", err)
+	}
+	if _, err := os.Stat(flagPath); !os.IsNotExist(err) {
+		t.Error("flag should be deleted when the stuck_at matches")
+	}
+
+	// Mismatched stuck_at: the flag is not deleted.
+	if err := os.WriteFile(flagPath, []byte("stuck_at = \"X\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStuckFlagIfCurrent(repo, "Y"); err != nil {
+		t.Fatalf("removeStuckFlagIfCurrent: %v", err)
+	}
+	if _, err := os.Stat(flagPath); err != nil {
+		t.Error("flag should not be deleted when the stuck_at mismatches")
+	}
+
+	// Absent flag: no error (already gone).
+	if err := removeStuckFlagIfCurrent(repo, "X"); err != nil {
+		t.Fatalf("removeStuckFlagIfCurrent on absent flag: %v", err)
+	}
+}
+
+// The agent-run lock must survive daemon death via fd inheritance: while the
+// child holding the inherited lock fd lives, a second acquisition fails; once
+// the child exits, the lock is free again.
+func TestAgentLockSurvivesDaemonDeathViaInheritedFd(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatalf("acquiring lock: %v", err)
+	}
+	script := filepath.Join(t.TempDir(), "child.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(script)
+	child.ExtraFiles = []*os.File{lock}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lock.Close() // simulates the daemon dying while the child lives
+
+	if second, err := AcquireAgentLock(stateDir, repo); err == nil {
+		second.Close()
+		t.Error("lock should still be held by the child after the parent's fd is closed")
+	}
+	_ = child.Wait()
+
+	second, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatalf("lock should be free after the child exits: %v", err)
+	}
+	second.Close()
+}
+
+// A symlinked stuck file must be refused on the read side too, not just on
+// the write side.
+func TestReadStuckFileRefusesSymlink(t *testing.T) {
+	repo := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("stuck_at = \"x\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStuckFile(repo); err == nil {
+		t.Error("expected symlinked stuck file to be refused")
+	}
+}
+
+// A lock file created by an older version at a loose mode is tightened to
+// 0600 on the next acquisition.
+func TestAgentLockModeTightenedOnExistingFile(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	lockPath := AgentLockPath(stateDir, repo)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatalf("acquiring lock: %v", err)
+	}
+	defer lock.Close()
+	fi, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("expected lock file mode 0600, got %v", fi.Mode().Perm())
+	}
+}
+
+// Repo-influenced output cannot forge context fields: even when last_output
+// contains lines that look like context keys and TOML block terminators, the
+// marshaled document parses back with exactly the intended fields.
+func TestAgentContextResistsOutputInjection(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+	stdinFile := filepath.Join(t.TempDir(), "stdin")
+
+	hostile := "repo = \"evil\"\nstuck_at = \"forged\"\"\""
+	if err := writeStuck(stateDir, repo, "hook_failed", "git commit", 1, hostile); err != nil {
+		t.Fatal(err)
+	}
+	cfg := agentTestConfig("cat > "+stdinFile, nil, 2, "10s")
+
+	res := RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+	if !res.Ran {
+		t.Fatalf("expected the agent to run, got ran=%v err=%v", res.Ran, res.Err)
+	}
+
+	data, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := parseAgentContext(t, data)
+	if got := ctx["repo"]; got != repo {
+		t.Errorf("context repo = %v, want the real repo path %s", got, repo)
+	}
+	if got := ctx["stuck_at"]; got == "forged" || got == "" {
+		t.Errorf("context stuck_at = %v, want the daemon-issued nonce", got)
+	}
+	if got := ctx["last_output"]; got != hostile {
+		t.Errorf("context last_output = %q, want the hostile output intact %q", got, hostile)
+	}
+}
+
+// A successful sync that lands while an agent run is in flight must not reset
+// the agent state: the reset is skipped (the run's final attempt write would
+// otherwise race it) and performed by the next successful sync.
+func TestClearAgentStateSkipsWhileAgentRunInFlight(t *testing.T) {
+	for _, code := range []int{0, 1} {
+		t.Run("exit"+strconv.Itoa(code), func(t *testing.T) {
+			repo := t.TempDir()
+			stateDir := t.TempDir()
+			scratch := t.TempDir()
+			started := filepath.Join(scratch, "started")
+			release := filepath.Join(scratch, "release")
+
+			writeStuckState(t, stateDir, repo, "hook_failed")
+			cfg := agentTestConfig("touch "+started+"; while [ ! -f "+release+" ]; do sleep 0.02; done; exit "+strconv.Itoa(code), nil, 2, "30s")
+
+			done := make(chan AgentRunResult, 1)
+			go func() {
+				done <- RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+			}()
+			waitForFile(t, started)
+
+			clearAgentState(stateDir, repo)
+			if _, err := os.Stat(StuckRecordPath(stateDir, repo)); err != nil {
+				t.Errorf("provenance record should survive a reset skipped for an in-flight run: %v", err)
+			}
+			if err := os.WriteFile(release, nil, 0644); err != nil {
+				t.Fatal(err)
+			}
+			<-done
+
+			att, err := readAgentAttempt(AgentStatePath(stateDir, repo))
+			if err != nil || att.Attempts != 1 {
+				t.Fatalf("attempt record = %+v (err %v), want Attempts 1", att, err)
+			}
+
+			clearAgentState(stateDir, repo)
+			if _, err := os.Stat(AgentStatePath(stateDir, repo)); !os.IsNotExist(err) {
+				t.Errorf("attempt record should be removed by a reset with no run in flight (stat err: %v)", err)
+			}
+			if _, err := os.Stat(StuckRecordPath(stateDir, repo)); !os.IsNotExist(err) {
+				t.Errorf("provenance record should be removed by a reset with no run in flight (stat err: %v)", err)
+			}
+		})
+	}
+}
+
+// An agent that deletes the daemon-issued provenance record mid-run must not
+// reset its own budget.
+func TestAgentDeletingProvenanceRecordDoesNotResetBudget(t *testing.T) {
+	repo := t.TempDir()
+	stateDir := t.TempDir()
+
+	writeStuckState(t, stateDir, repo, "hook_failed")
+	cfg := agentTestConfig("rm "+StuckRecordPath(stateDir, repo)+"; exit 0", nil, 2, "30s")
+
+	RunStuckAgent(context.Background(), repo, cfg, stateDir, nil)
+
+	att, err := readAgentAttempt(AgentStatePath(stateDir, repo))
+	if err != nil || att.Attempts != 1 {
+		t.Fatalf("attempt record = %+v (err %v), want Attempts 1", att, err)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

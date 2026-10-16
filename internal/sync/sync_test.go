@@ -144,6 +144,42 @@ func TestSyncReadOnly(t *testing.T) {
 	}
 }
 
+func TestSyncSuccessWithoutAgentStateCreatesNoAgentFiles(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-only", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-only",
+		SyncBranch: "main",
+		Interval:   "30s",
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	if _, err := os.Stat(filepath.Join(stateDir, "agent")); !os.IsNotExist(err) {
+		t.Errorf("agent state dir should not be created by a successful sync with no agent episode (stat err: %v)", err)
+	}
+	if _, err := os.Stat(AgentLockPath(stateDir, repo)); !os.IsNotExist(err) {
+		t.Errorf("agent lock file should not be created by a successful sync with no agent episode (stat err: %v)", err)
+	}
+}
+
 func TestSyncReadWrite(t *testing.T) {
 	remote := gitInitBare(t)
 	defer os.RemoveAll(remote)
@@ -257,6 +293,69 @@ func TestSyncConflictStuck(t *testing.T) {
 	}
 	if !strings.Contains(s, "git pull --rebase") {
 		t.Errorf("expected last_command in stuck file, got:\n%s", s)
+	}
+}
+
+// A read-write sync that fails on a commit hook while the agent lock is held
+// must surface the writeStuck failure: the stuck flag can't be recorded (an
+// agent run is in flight), so the error carries the "recording stuck state"
+// surface rather than silently dropping the stuck record.
+func TestSyncReadWriteHookFailedSurfacesWriteStuckFailure(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "", nil, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Dirty a file so there is something to commit.
+	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("changes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A failing pre-commit hook makes git commit fail with a hook error.
+	gitDir := testGit(t, repo, "rev-parse", "--absolute-git-dir")
+	gitDir = strings.TrimSpace(gitDir)
+	hookPath := filepath.Join(gitDir, "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho \"pre-commit hook failed\" >&2\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	// Hold the agent lock so writeStuck fails.
+	lock, err := AcquireAgentLock(stateDir, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "stuck" {
+		t.Fatalf("expected stuck, got %s: %s", result.State, result.Error)
+	}
+	if !strings.Contains(result.Error, "recording stuck state") {
+		t.Errorf("Error = %q, want it to contain \"recording stuck state\"", result.Error)
 	}
 }
 

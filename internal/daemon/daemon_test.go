@@ -9,9 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/status"
+	gitSync "github.com/sdougbrown/git-tend/internal/sync"
+	"golang.org/x/sys/unix"
 )
 
 func testGit(t *testing.T, dir string, args ...string) string {
@@ -70,6 +73,404 @@ func initRepoWithRemote(t *testing.T, repoDir, remote, mode, debounce, extraFile
 		if err := os.WriteFile(filepath.Join(repoDir, extraFile), []byte("content"), 0644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// agentEntry parses agentTOML (a [repo.agent] table) as a user-level [[repo]]
+// entry for repoDir, so tests configure the agent the way production does —
+// through the user config, never the repo's .gittend.
+func agentEntry(t *testing.T, repoDir, agentTOML string) []config.RepoEntry {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "user-config.toml")
+	doc := fmt.Sprintf("[[repo]]\npath = %q\n%s", repoDir, agentTOML)
+	if err := os.WriteFile(path, []byte(doc), 0644); err != nil {
+		t.Fatal(err)
+	}
+	uc, err := config.ParseUserConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uc.Repos
+}
+
+// setupStuckAgentRepo builds a read-write repo with a failing pre-commit
+// hook and an agent configured to fail (exit 1), plus a daemon watching it.
+// The first tick marks the repo stuck (hook_failed) and runs the failing
+// agent. Returns the repo path, the agent's marker file, the pre-commit
+// hook path, the daemon's state dir, and the daemon.
+func setupStuckAgentRepo(t *testing.T) (repoDir, marker, hookPath, stateDir string, d *Daemon) {
+	t.Helper()
+
+	tempRoot := t.TempDir()
+	remote := setupBareRemote(t)
+	repoDir = filepath.Join(tempRoot, "agent-repo")
+
+	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
+
+	marker = filepath.Join(t.TempDir(), "marker")
+
+	hookPath = filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.UserConfig{
+		Roots:          []string{tempRoot},
+		Interval:       "1s",
+		ScanDepth:      2,
+		NetworkTimeout: "5s",
+	}
+	// The agent command is user-level only, so it goes into the daemon's
+	// user config, not the repo's .gittend.
+	cfg.Repos = agentEntry(t, repoDir, fmt.Sprintf("[repo.agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker))
+	stateDir = t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d = New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d.rescanRoots()
+
+	return repoDir, marker, hookPath, stateDir, d
+}
+
+func TestDaemonTickRunsAgentAndResetsOnOk(t *testing.T) {
+	repoDir, marker, hookPath, stateDir, d := setupStuckAgentRepo(t)
+
+	ctx := context.Background()
+
+	// Tick 1: sync fails at the hook, repo goes stuck, and the agent starts
+	// (asynchronously) and fails.
+	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 1)
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found after tick 1")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.CurrentState != "stuck" {
+		t.Fatalf("tick 1: state = %s (%s), want stuck", rs.CurrentState, rs.LastError)
+	}
+	if rs.AgentAttempts != 1 || rs.AgentMaxAttempts != 2 {
+		t.Errorf("tick 1: agent budget = %d/%d, want 1/2", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+	if n := countMarkerRuns(marker); n != 1 {
+		t.Errorf("tick 1: agent command ran %d times, want 1", n)
+	}
+
+	// Simulate the agent's own recovery: flag cleared, hook fixed. Both
+	// records (attempt and provenance) are deliberately left in place so the
+	// successful tick's cleanup is observed to remove them.
+	if err := os.Remove(filepath.Join(repoDir, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tick 2: sync succeeds; the ok branch resets the displayed budget and
+	// clears the attempt and provenance records on disk.
+	d.tick(ctx)
+
+	sf2 := status.Read(filepath.Join(stateDir, "status.json"))
+	rs2 := sf2.Repos[repoDir]
+	if rs2.CurrentState != "ok" {
+		t.Fatalf("tick 2: state = %s (%s), want ok", rs2.CurrentState, rs2.LastError)
+	}
+	if rs2.AgentAttempts != 0 || rs2.AgentMaxAttempts != 0 {
+		t.Errorf("tick 2: agent budget = %d/%d, want 0/0 after ok", rs2.AgentAttempts, rs2.AgentMaxAttempts)
+	}
+	if _, err := os.Stat(gitSync.AgentStatePath(stateDir, repoDir)); !os.IsNotExist(err) {
+		t.Error("tick 2: a successful sync should remove the attempt record")
+	}
+	if _, err := os.Stat(gitSync.StuckRecordPath(stateDir, repoDir)); !os.IsNotExist(err) {
+		t.Error("tick 2: a successful sync should remove the provenance record")
+	}
+}
+
+func countMarkerRuns(marker string) int {
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return 0
+	}
+	return len(strings.Split(strings.TrimRight(string(data), "\n"), "\n"))
+}
+
+// waitAgentBudget polls the on-disk status until the repo's agent budget
+// reaches at least wantAttempts. The agent run is asynchronous: its status
+// update lands via the run's own writeStatus, after the tick has returned.
+func waitAgentBudget(t *testing.T, stateDir, repoDir string, wantAttempts int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if sf := status.Read(filepath.Join(stateDir, "status.json")); sf != nil {
+			if got := sf.Repos[repoDir].AgentAttempts; got >= wantAttempts {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for agent budget >= %d on disk", wantAttempts)
+}
+
+func TestDaemonTickClearsAgentBudgetWhenAgentDisabled(t *testing.T) {
+	repoDir, _, _, stateDir, d := setupStuckAgentRepo(t)
+
+	ctx := context.Background()
+
+	// Tick 1: the hook fails, the repo goes stuck, and the agent starts
+	// (asynchronously) and fails.
+	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 1)
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found after tick 1")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.CurrentState != "stuck" {
+		t.Fatalf("tick 1: state = %s (%s), want stuck", rs.CurrentState, rs.LastError)
+	}
+	if rs.AgentAttempts != 1 || rs.AgentMaxAttempts != 2 {
+		t.Errorf("tick 1: agent budget = %d/%d, want 1/2", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+
+	// The operator removes the agent from the user config; the repo stays
+	// stuck.
+	d.userCfg.Repos = nil
+	d.rescanRoots()
+
+	// Tick 2: the repo is still stuck, but with the agent disabled the stale
+	// budget must not linger — status shows plain stuck, not "agent pending".
+	d.tick(ctx)
+
+	sf2 := status.Read(filepath.Join(stateDir, "status.json"))
+	rs2 := sf2.Repos[repoDir]
+	if rs2.CurrentState != "stuck" {
+		t.Fatalf("tick 2: state = %s, want stuck", rs2.CurrentState)
+	}
+	if rs2.AgentAttempts != 0 || rs2.AgentMaxAttempts != 0 {
+		t.Errorf("tick 2: agent budget = %d/%d, want 0/0 after agent disabled", rs2.AgentAttempts, rs2.AgentMaxAttempts)
+	}
+}
+
+// A repo that configures the agent in its own .gittend gets nothing: the
+// whole [agent] section is user-level only, so the daemon resolves no agent
+// config, never engages the agent, and the command never runs.
+func TestDaemonIgnoresGittendAgentSection(t *testing.T) {
+	tempRoot := t.TempDir()
+	remote := setupBareRemote(t)
+	repoDir := filepath.Join(tempRoot, "agent-repo")
+
+	initRepoWithRemote(t, repoDir, remote, "read-write", "0s", "work.txt")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	// The repo tries to arm the agent itself. The daemon must ignore it.
+	gittend := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = \"echo ran >> %s; exit 1\"\n", marker)
+	if err := os.WriteFile(filepath.Join(repoDir, ".gittend"), []byte(gittend), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repoDir, "add", ".gittend")
+	testGitOK(t, repoDir, "commit", "-m", "agent config")
+	testGitOK(t, repoDir, "push", "-u", "origin", "main")
+
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// User config deliberately carries no [repo.agent] entry.
+	cfg := &config.UserConfig{
+		Roots:          []string{tempRoot},
+		Interval:       "1s",
+		ScanDepth:      2,
+		NetworkTimeout: "5s",
+	}
+	stateDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d.rescanRoots()
+
+	ctx := context.Background()
+	d.tick(ctx)
+
+	// The repo is stuck, but with no agent engaged.
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found after tick 1")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.CurrentState != "stuck" {
+		t.Fatalf("state = %s (%s), want stuck", rs.CurrentState, rs.LastError)
+	}
+	if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+		t.Errorf("agent budget = %d/%d, want 0/0 (the .gittend [agent] section is ignored)", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+
+	// Any run the tick started finishes (and writes its marker) before Wait returns.
+	d.agentRuns.Wait()
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("agent command ran although only the .gittend configured it")
+	}
+}
+
+// A repeat stuck tick must persist the budget transition (1/2 -> 2/2) to the
+// on-disk status: the tick only bumps UpdatedAt on the ok->stuck transition,
+// so without the bump in maybeRunAgent the merge keeps the stale on-disk
+// budget and the display freezes at 1/2.
+func TestDaemonTickAgentBudgetReachesCapOnDisk(t *testing.T) {
+	repoDir, _, _, stateDir, d := setupStuckAgentRepo(t)
+
+	ctx := context.Background()
+
+	// Tick 1: the hook fails, the repo goes stuck, and the agent starts
+	// (asynchronously) and fails.
+	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 1)
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found after tick 1")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.CurrentState != "stuck" {
+		t.Fatalf("tick 1: state = %s (%s), want stuck", rs.CurrentState, rs.LastError)
+	}
+	if rs.AgentAttempts != 1 || rs.AgentMaxAttempts != 2 {
+		t.Errorf("tick 1: agent budget = %d/%d, want 1/2", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+
+	// Tick 2: the repo is still stuck; the agent runs its final attempt and
+	// fails. The 1/2 -> 2/2 transition must reach the on-disk status, or the
+	// display freezes at 1/2 and "agent exhausted" never shows.
+	d.tick(ctx)
+	waitAgentBudget(t, stateDir, repoDir, 2)
+
+	sf2 := status.Read(filepath.Join(stateDir, "status.json"))
+	rs2 := sf2.Repos[repoDir]
+	if rs2.CurrentState != "stuck" {
+		t.Fatalf("tick 2: state = %s, want stuck", rs2.CurrentState)
+	}
+	if rs2.AgentAttempts != 2 || rs2.AgentMaxAttempts != 2 {
+		t.Errorf("tick 2: agent budget on disk = %d/%d, want 2/2", rs2.AgentAttempts, rs2.AgentMaxAttempts)
+	}
+}
+
+// The agent run must not block the serial per-repo tick loop: the tick that
+// starts a slow agent command returns promptly, and a later tick for a
+// different repo proceeds without waiting for the agent.
+func TestDaemonTickAgentRunDoesNotBlockTick(t *testing.T) {
+	tempRoot := t.TempDir()
+	remote := setupBareRemote(t)
+
+	// agent-repo: read-write with a failing pre-commit hook and a slow
+	// agent that blocks until the release file exists (capped at 10s), then
+	// exits 1.
+	agentRepo := filepath.Join(tempRoot, "agent-repo")
+	initRepoWithRemote(t, agentRepo, remote, "read-write", "0s", "work.txt")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	release := filepath.Join(t.TempDir(), "release")
+	slowAgent := fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; echo ran >> %s; exit 1", release, marker)
+	agentCfg := fmt.Sprintf("mode = \"read-write\"\ndebounce = \"0s\"\n\n[agent]\non_stuck_cmd = %q\n", slowAgent)
+	if err := os.WriteFile(filepath.Join(agentRepo, ".gittend"), []byte(agentCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, agentRepo, "add", ".gittend")
+	testGitOK(t, agentRepo, "commit", "-m", "agent config")
+	testGitOK(t, agentRepo, "push", "-u", "origin", "main")
+
+	hookPath := filepath.Join(agentRepo, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// other-repo: a healthy read-write repo that must not be delayed by the
+	// agent run. Its own bare remote: both repos push to main.
+	otherRepo := filepath.Join(tempRoot, "other-repo")
+	initRepoWithRemote(t, otherRepo, setupBareRemote(t), "read-write", "0s", "")
+
+	cfg := &config.UserConfig{
+		Roots:          []string{tempRoot},
+		Interval:       "1s",
+		ScanDepth:      2,
+		NetworkTimeout: "5s",
+	}
+	cfg.Repos = agentEntry(t, agentRepo, fmt.Sprintf("[repo.agent]\non_stuck_cmd = %q\n", slowAgent))
+	stateDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := New(cfg, filepath.Join(stateDir, "config.toml"), stateDir, logger)
+	d.rescanRoots()
+
+	if len(d.repos) != 2 {
+		t.Fatalf("expected 2 repos after rescan, got %d", len(d.repos))
+	}
+
+	ctx := context.Background()
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
+
+	// Tick 1: agent-repo goes stuck and starts the slow agent. The tick must
+	// return while the agent is still blocked (it cannot finish before the
+	// release file exists, and the 10s cap is far above the bound).
+	start := time.Now()
+	d.tick(ctx)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("tick 1 took %v, want < 5s (the agent run must not block the tick)", elapsed)
+	}
+	if countMarkerRuns(marker) != 0 {
+		t.Fatal("agent finished before tick 1 returned; the tick may have blocked on it")
+	}
+
+	// Tick 2, while the agent is still running: other-repo syncs and the
+	// tick returns promptly. The repeat agent run is refused by the per-repo
+	// flock and returns immediately.
+	start = time.Now()
+	d.tick(ctx)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("tick 2 took %v, want < 5s (the in-flight agent must not delay other repos)", elapsed)
+	}
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	if rs := sf.Repos[otherRepo]; rs.CurrentState != "ok" {
+		t.Errorf("other repo state = %s (%s), want ok", rs.CurrentState, rs.LastError)
+	}
+
+	// The slow agent's budget lands on disk once it finishes.
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	waitAgentBudget(t, stateDir, agentRepo, 1)
+	d.agentRuns.Wait()
+	if err := os.Remove(release); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tick 3 while no run is in flight: the agent runs again (attempt 2 of
+	// 2, blocked on the release file). Tick 4 is refused by the in-flight
+	// run; its result reports MaxAttempts 0 (not engaged) and must not wipe
+	// the displayed budget back to 1/0.
+	d.tick(ctx)
+	waitForAgentLockHeld(t, stateDir, agentRepo)
+	doneBefore := d.agentRunsDone.Load()
+	d.tick(ctx)
+	deadline := time.Now().Add(10 * time.Second)
+	for d.agentRunsDone.Load() == doneBefore {
+		if time.Now().After(deadline) {
+			t.Fatal("refused agent run did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sf = status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	rs := sf.Repos[agentRepo]
+	if rs.AgentAttempts != 1 || rs.AgentMaxAttempts != 2 {
+		t.Errorf("budget after refused tick = %d/%d, want 1/2 (a refused run must not clobber the budget)", rs.AgentAttempts, rs.AgentMaxAttempts)
 	}
 }
 
@@ -222,7 +623,7 @@ func TestRescanRoots(t *testing.T) {
 	}
 
 	cfg := &config.UserConfig{
-		Roots:    []string{tempRoot},
+		Roots:     []string{tempRoot},
 		ScanDepth: 2,
 	}
 	stateDir := t.TempDir()
@@ -343,5 +744,174 @@ func TestOfflineBackoff(t *testing.T) {
 
 	if off.consecutiveFailures != 3 {
 		t.Errorf("expected 3 consecutive failures in daemon state, got %d", off.consecutiveFailures)
+	}
+}
+
+// Disabling the agent while a run is in flight must leave the cleared budget
+// alone: the in-flight run's completion re-checks the live config under
+// d.mu and defers to the disable path, so the stale result never re-appears
+// as "agent pending" on a repo with no agent configured.
+func TestDaemonTickAgentDisabledMidRunKeepsBudgetCleared(t *testing.T) {
+	repoDir, marker, _, stateDir, d := setupStuckAgentRepo(t)
+
+	// The agent blocks until the release file exists (capped at 10s), so the
+	// run stays in flight across the disable and the following tick.
+	release := filepath.Join(t.TempDir(), "release")
+	cfg := d.repos[0].Config
+	cfg.Agent.OnStuckCmd = fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; echo ran >> %s; exit 1", release, marker)
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
+
+	ctx := context.Background()
+
+	// Tick 1: the repo goes stuck and the slow agent starts.
+	d.tick(ctx)
+
+	// Wait until the run holds the agent lock, then disable the agent while
+	// it is in flight: rescan with a user config that carries no [repo.agent]
+	// entry for the repo.
+	waitForAgentLockHeld(t, stateDir, repoDir)
+	d.userCfg.Repos = nil
+	d.rescanRoots()
+
+	// The next tick runs the disabled-agent clear path (0/0) while the run
+	// is still in flight.
+	d.tick(ctx)
+
+	// Only now let the agent finish, so the run was in flight for tick 2.
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the in-flight run's completion goroutine to apply (or skip)
+	// its result.
+	d.agentRuns.Wait()
+
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	rs := sf.Repos[repoDir]
+	if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+		t.Errorf("agent budget after disable-mid-run = %d/%d, want 0/0 (the stale in-flight result must not re-appear)", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+}
+
+// A repo removed by a rescan while its agent run is in flight must stay
+// removed: the completion must not re-add a zero-valued status entry, which
+// status renders as "ok".
+func TestDaemonAgentCompletionDoesNotResurrectRemovedRepo(t *testing.T) {
+	repoDir, marker, _, stateDir, d := setupStuckAgentRepo(t)
+
+	release := filepath.Join(t.TempDir(), "release")
+	d.repos[0].Config.Agent.OnStuckCmd = fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; echo ran >> %s; exit 1", release, marker)
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
+
+	d.tick(context.Background())
+	waitForAgentLockHeld(t, stateDir, repoDir)
+
+	d.userCfg.Roots = []string{t.TempDir()}
+	d.userCfg.Repos = nil
+	d.rescanRoots()
+	if _, ok := d.repoStatus[repoDir]; ok {
+		t.Fatal("rescan did not remove the repo from repoStatus")
+	}
+
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	d.agentRuns.Wait()
+
+	d.mu.Lock()
+	_, tracked := d.repoStatus[repoDir]
+	d.mu.Unlock()
+	if tracked {
+		t.Error("repoStatus re-added the removed repo after the agent run completed")
+	}
+	if sf := status.Read(filepath.Join(stateDir, "status.json")); sf != nil {
+		if _, ok := sf.Repos[repoDir]; ok {
+			t.Error("status file lists the removed repo after the agent run completed")
+		}
+	}
+}
+
+// A run that completes after a tick recovered the repo to ok must not rewrite
+// the budget the ok branch cleared.
+func TestDaemonAgentCompletionAfterOkKeepsBudgetCleared(t *testing.T) {
+	repoDir, _, hookPath, stateDir, d := setupStuckAgentRepo(t)
+
+	release := filepath.Join(t.TempDir(), "release")
+	d.repos[0].Config.Agent.OnStuckCmd = fmt.Sprintf("i=0; while [ ! -e %s ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; exit 1", release)
+	t.Cleanup(func() {
+		os.WriteFile(release, nil, 0644)
+		d.agentRuns.Wait()
+	})
+
+	ctx := context.Background()
+
+	d.tick(ctx)
+	waitForAgentLockHeld(t, stateDir, repoDir)
+
+	// Recover the repo while the agent is still in flight: the next tick
+	// syncs successfully and takes the ok branch.
+	if err := os.Remove(filepath.Join(repoDir, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	d.tick(ctx)
+
+	d.mu.Lock()
+	okState := d.repoStatus[repoDir].CurrentState
+	d.mu.Unlock()
+	if okState != "ok" {
+		t.Fatalf("state after recovery tick = %s, want ok", okState)
+	}
+
+	if err := os.WriteFile(release, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	d.agentRuns.Wait()
+
+	d.mu.Lock()
+	rs := d.repoStatus[repoDir]
+	d.mu.Unlock()
+	if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+		t.Errorf("in-memory agent budget = %d/%d, want 0/0 after ok", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+	sf := status.Read(filepath.Join(stateDir, "status.json"))
+	if sf == nil {
+		t.Fatal("status file not found")
+	}
+	if got := sf.Repos[repoDir]; got.AgentAttempts != 0 || got.AgentMaxAttempts != 0 {
+		t.Errorf("on-disk agent budget = %d/%d, want 0/0 after ok", got.AgentAttempts, got.AgentMaxAttempts)
+	}
+}
+
+// waitForAgentLockHeld blocks until the agent run holds the per-repo agent
+// lock, proven by a non-blocking flock probe failing on a separate fd.
+func waitForAgentLockHeld(t *testing.T, stateDir, repoPath string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		probe, err := os.OpenFile(gitSync.AgentLockPath(stateDir, repoPath), os.O_CREATE|os.O_RDONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = unix.Flock(int(probe.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		probe.Close()
+		if err != nil {
+			return // held: the probe failed
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent never acquired the lock")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

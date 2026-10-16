@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sys/unix"
 
 	"github.com/sdougbrown/git-tend/internal/commit"
@@ -74,11 +75,45 @@ func sync(ctx context.Context, repoPath string, cfg *config.Config, stateDir str
 
 	timeout := parseIntervalTimeout(cfg.Interval)
 
+	var result SyncResult
 	if cfg.Mode == "read-only" {
-		return syncReadOnly(ctx, repoPath, timeout)
+		result = syncReadOnly(ctx, repoPath, stateDir, timeout)
+	} else {
+		result = syncReadWrite(ctx, repoPath, cfg, stateDir, timeout, bypassDebounce, branch)
 	}
+	if result.State == "ok" {
+		clearAgentState(stateDir, repoPath)
+	}
+	return result
+}
 
-	return syncReadWrite(ctx, repoPath, cfg, timeout, bypassDebounce, branch)
+// clearAgentState drops the agent state once a stuck episode is truly over: a
+// successful sync means the flag is gone and the repo syncs, so the attempt
+// budget and the daemon-issued provenance record are both reset. Errors are
+// ignored: stale state fails safe — the agent just won't run.
+//
+// The reset takes the agent lock so it doesn't interleave with a daemon-side
+// run's final attempt write. The lock only coordinates daemon callers; the
+// agent command itself is not constrained by it. The lock is only try-locked:
+// waiting would stall sync for the agent's whole timeout. When a run holds the
+// lock the reset is skipped, which only keeps the budget conservative; the
+// next successful sync performs it.
+//
+// With no agent state on disk there is nothing to reset, so the lock is not
+// taken and no agent state directory is created.
+func clearAgentState(stateDir, repoPath string) {
+	_, attErr := os.Stat(AgentStatePath(stateDir, repoPath))
+	_, recErr := os.Stat(StuckRecordPath(stateDir, repoPath))
+	if os.IsNotExist(attErr) && os.IsNotExist(recErr) {
+		return
+	}
+	lock, err := AcquireAgentLock(stateDir, repoPath)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	_ = os.Remove(AgentStatePath(stateDir, repoPath))
+	_ = os.Remove(StuckRecordPath(stateDir, repoPath))
 }
 
 func parseIntervalTimeout(interval string) time.Duration {
@@ -95,14 +130,13 @@ func parseDebounce(debounce string) time.Duration {
 	return 30 * time.Second
 }
 
-func syncReadOnly(ctx context.Context, repoPath string, timeout time.Duration) SyncResult {
+func syncReadOnly(ctx context.Context, repoPath, stateDir string, timeout time.Duration) SyncResult {
 	_, stderr, err, isNet := git.Fetch(ctx, repoPath, timeout)
 	if isNet {
 		return SyncResult{State: "offline", Error: err.Error()}
 	}
 	if err != nil {
-		writeStuck(repoPath, "other", "git fetch", exitCodeFromErr(err), stderr)
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("fetch: %v", err)}
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git fetch", exitCodeFromErr(err), stderr), "fetch")
 	}
 
 	stdout, stderr, err, isNet := git.PullRebase(ctx, repoPath, timeout)
@@ -111,14 +145,13 @@ func syncReadOnly(ctx context.Context, repoPath string, timeout time.Duration) S
 	}
 	if err != nil {
 		git.RebaseAbort(repoPath)
-		writeStuck(repoPath, "rebase_conflict", "git pull --rebase", exitCodeFromErr(err), combineOutput(stdout, stderr))
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("pull: %v", err)}
+		return stuckResult(err, writeStuck(stateDir, repoPath, "rebase_conflict", "git pull --rebase", exitCodeFromErr(err), combineOutput(stdout, stderr)), "pull")
 	}
 
 	return SyncResult{State: "ok"}
 }
 
-func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, timeout time.Duration, bypassDebounce bool, branch string) SyncResult {
+func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, stateDir string, timeout time.Duration, bypassDebounce bool, branch string) SyncResult {
 	debounceDur := parseDebounce(cfg.Debounce)
 
 	// Back off if git appears busy, so we don't tend the repo out from under a
@@ -170,21 +203,18 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 		args = append(args, ":!.gittend.stuck")
 		args = append(args, excludeSpecs...)
 		if err := git.Add(repoPath, args...); err != nil {
-			writeStuck(repoPath, "other", "git add", exitCodeFromErr(err), err.Error())
-			return SyncResult{State: "stuck", Error: fmt.Sprintf("staging: %v", err)}
+			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
 		}
 	} else {
 		args := append([]string{"-A", "--", ":!.gittend.stuck"}, excludeSpecs...)
 		if err := git.Add(repoPath, args...); err != nil {
-			writeStuck(repoPath, "other", "git add", exitCodeFromErr(err), err.Error())
-			return SyncResult{State: "stuck", Error: fmt.Sprintf("staging: %v", err)}
+			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
 		}
 	}
 
 	diff, err := git.DiffCachedNameStatus(repoPath)
 	if err != nil {
-		writeStuck(repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error())
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("diff cached: %v", err)}
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error()), "diff cached")
 	}
 
 	if strings.TrimSpace(diff) != "" {
@@ -248,8 +278,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 			msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
 		}
 		if err := git.Commit(repoPath, msg, cfg.Commit.NoVerify); err != nil {
-			writeStuck(repoPath, "hook_failed", "git commit", exitCodeFromErr(err), err.Error())
-			return SyncResult{State: "stuck", Error: fmt.Sprintf("commit: %v", err)}
+			return stuckResult(err, writeStuck(stateDir, repoPath, "hook_failed", "git commit", exitCodeFromErr(err), err.Error()), "commit")
 		}
 		// The sentinel git writes for manual commits is only meaningful for
 		// human activity; clear it after our own commit so we don't back off
@@ -263,8 +292,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 	}
 	if err != nil {
 		git.RebaseAbort(repoPath)
-		writeStuck(repoPath, "rebase_conflict", "git pull --rebase", exitCodeFromErr(err), combineOutput(stdout, stderr))
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("pull: %v", err)}
+		return stuckResult(err, writeStuck(stateDir, repoPath, "rebase_conflict", "git pull --rebase", exitCodeFromErr(err), combineOutput(stdout, stderr)), "pull")
 	}
 
 	stdout, stderr, err, isNet = git.Push(ctx, repoPath, timeout)
@@ -272,8 +300,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, tim
 		return SyncResult{State: "offline", Error: err.Error()}
 	}
 	if err != nil {
-		writeStuck(repoPath, "push_rejected", "git push", exitCodeFromErr(err), combineOutput(stdout, stderr))
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("push: %v", err)}
+		return stuckResult(err, writeStuck(stateDir, repoPath, "push_rejected", "git push", exitCodeFromErr(err), combineOutput(stdout, stderr)), "push")
 	}
 
 	return SyncResult{State: "ok"}
@@ -291,27 +318,69 @@ func translateExcludePaths(paths []string) []string {
 	return specs
 }
 
-func writeStuck(repoPath, reason, lastCommand string, exitCode int, output string) error {
-	path := filepath.Join(repoPath, ".gittend.stuck")
-	f, err := os.Create(path)
+// writeStuck writes the repo-local .gittend.stuck flag and, alongside it, a
+// daemon-issued provenance record in the state dir (see stuckRecord). The
+// record is what authorizes the agent to act on the flag. The record is
+// written FIRST: a crash between the two writes then leaves a record with no
+// flag — the agent has no flag to act on, which is the fail-safe direction.
+// Both writes happen under the agent lock so an in-flight agent run's
+// cleanup can never interleave with (and mis-delete) a fresh episode's record.
+func writeStuck(stateDir, repoPath, reason, lastCommand string, exitCode int, output string) error {
+	lock, err := AcquireAgentLock(stateDir, repoPath)
 	if err != nil {
+		return fmt.Errorf("agent run in flight, not recording stuck state: %w", err)
+	}
+	defer lock.Close()
+
+	// Nanosecond precision: stuck_at doubles as the nonce the provenance
+	// record is matched against, so two episodes must not collide.
+	stuckAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeStuckRecord(stateDir, repoPath, stuckAt, reason); err != nil {
 		return err
 	}
-	defer f.Close()
 
 	if len(output) > 4096 {
 		output = output[len(output)-4096:]
 	}
 
-	_, err = fmt.Fprintf(f, `stuck_at = %q
-reason = %q
-last_command = %q
-last_exit_code = %d
-last_output = """
-%s"""
-`, time.Now().UTC().Format(time.RFC3339), reason, lastCommand, exitCode, output)
+	path := filepath.Join(repoPath, ".gittend.stuck")
+	// O_NOFOLLOW: the path is repo-controlled, so a symlink planted there
+	// must not turn this into a write through to an arbitrary target (the
+	// output is repo-influenced, up to 4KiB).
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|unix.O_NOFOLLOW, 0644)
+	if err != nil {
+		return err
+	}
+	// Marshal (rather than hand-formatting) so the repo-influenced output is
+	// escaped: raw """ in it would otherwise break the file's TOML and the
+	// agent would never run for that episode.
+	data, err := toml.Marshal(stuckFile{
+		StuckAt:      stuckAt,
+		Reason:       reason,
+		LastCommand:  lastCommand,
+		LastExitCode: exitCode,
+		LastOutput:   output,
+	})
+	if err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
 
-	return err
+// stuckResult builds the result for a sync that failed and tried to record the
+// stuck state. A failure to record it is appended to the error so it is never
+// silently dropped — the flag simply isn't written and the next tick retries.
+func stuckResult(err, writeErr error, op string) SyncResult {
+	msg := fmt.Sprintf("%s: %v", op, err)
+	if writeErr != nil {
+		msg += fmt.Sprintf(" (recording stuck state: %v)", writeErr)
+	}
+	return SyncResult{State: "stuck", Error: msg}
 }
 
 func combineOutput(stdout, stderr string) string {

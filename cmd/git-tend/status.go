@@ -48,6 +48,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if state == "" {
 			state = "ok"
 		}
+		detail := ""
+		if state == "stuck" && rs.AgentMaxAttempts > 0 {
+			if rs.AgentAttempts >= rs.AgentMaxAttempts {
+				detail = fmt.Sprintf("agent exhausted, attempts %d/%d", rs.AgentAttempts, rs.AgentMaxAttempts)
+			} else {
+				detail = fmt.Sprintf("agent pending, attempts %d/%d", rs.AgentAttempts, rs.AgentMaxAttempts)
+			}
+		}
 
 		lastSync := "never"
 		if rs.LastSyncAt != "" {
@@ -70,6 +78,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		behind := fmt.Sprintf("%d", rs.Behind)
 
 		fmt.Printf("%-40s %-4s %-8s %-12s %-10s %-10s\n", path, mode, state, lastSync, ahead, behind)
+		// Agent detail is too wide for the fixed STATE column; render it on
+		// its own indented line so the grid stays aligned.
+		if rs.CurrentState == "stuck" && rs.AgentMaxAttempts > 0 {
+			fmt.Printf("%-40s %-4s %s\n", "", "", detail)
+		}
 	}
 
 	return nil

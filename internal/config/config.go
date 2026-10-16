@@ -22,6 +22,7 @@ type Config struct {
 	Include    IncludeConfig `toml:"include"`
 	Exclude    ExcludeConfig `toml:"exclude"`
 	Notify     NotifyConfig  `toml:"notify"`
+	Agent      AgentConfig   `toml:"agent"`
 }
 
 type CommitConfig struct {
@@ -57,6 +58,50 @@ type NotifyConfig struct {
 type RepoEntry struct {
 	Path string         `toml:"path"`
 	Raw  map[string]any `toml:"-"`
+}
+
+// Stuck reasons written to .gittend.stuck by the sync loop. rebase_conflict is
+// excluded from the default agent allowlist because auto-resolving merges in a
+// memory/config repo is a different risk class than rerunning a hook.
+var StuckReasons = []string{"hook_failed", "push_rejected", "rebase_conflict", "other"}
+
+// DefaultAgentMaxAttempts is the default [agent] max_attempts. It is exported
+// so RunStuckAgent's guard for hand-built configs applies the same value.
+const DefaultAgentMaxAttempts = 2
+
+// DefaultAgentTimeout is the default [agent] timeout. It is exported so
+// RunStuckAgent's guard for hand-built configs applies the same value.
+const DefaultAgentTimeout = "10m"
+
+type AgentConfig struct {
+	OnStuckCmd     string   `toml:"on_stuck_cmd"`
+	AllowedReasons []string `toml:"allowed_reasons"`
+	MaxAttempts    int      `toml:"max_attempts"`
+	Timeout        string   `toml:"timeout"`
+}
+
+// Enabled reports whether agent-assisted unstick is configured.
+func (a AgentConfig) Enabled() bool { return a.OnStuckCmd != "" }
+
+// nonzero reports whether any agent key decoded from a .gittend was set, so
+// clearUserOnlyKeys can warn about the [agent] table as one unit even when
+// only a non-string key like max_attempts was given.
+func (a AgentConfig) nonzero() bool {
+	return a.OnStuckCmd != "" || len(a.AllowedReasons) > 0 || a.MaxAttempts != 0 || a.Timeout != ""
+}
+
+// AllowsReason reports whether reason may trigger the agent, given an explicit
+// allowlist (empty/nil means the default: everything except rebase_conflict).
+func (a AgentConfig) AllowsReason(reason string) bool {
+	if len(a.AllowedReasons) == 0 {
+		return reason != "rebase_conflict"
+	}
+	for _, r := range a.AllowedReasons {
+		if r == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func ParseDuration(s string) (time.Duration, error) {
@@ -210,6 +255,9 @@ func ParseUserConfig(path string) (*UserConfig, error) {
 		if err := overlayEntry(&probe, &entries[i], entries[i].Path); err != nil {
 			return nil, err
 		}
+		if !rawAgentMaxAttemptsPresent(entries[i].Raw) {
+			probe.Agent.MaxAttempts = DefaultAgentMaxAttempts
+		}
 		if err := finalizeConfig(&probe); err != nil {
 			return nil, fmt.Errorf("invalid user repo entry for %s: %w", entries[i].Path, err)
 		}
@@ -342,28 +390,31 @@ var warnf = func(format string, args ...interface{}) {
 // userOnlyKeys lists per-repo keys honored only from a user-config [[repo]]
 // entry: a .gittend value for any of these is ignored with a warning, since
 // the keys execute commands with the daemon's privileges and a repo writer
-// must not control them. field addresses the key's decoded struct field so
-// the check cannot be bypassed by alternate key spellings (go-toml matches
-// struct fields case-insensitively, so [COMMIT] and MODEL_CMD decode into
-// the same field a plain model_cmd would); to add another key, add one line
-// here.
+// must not control them. set reports whether the key decoded to a non-empty
+// value and clear zeroes it; the pair (rather than a field pointer) lets
+// non-string and grouped keys like the whole [agent] table be expressed.
+// Both inspect the decoded struct fields, so the check cannot be bypassed by
+// alternate key spellings (go-toml matches struct fields case-insensitively,
+// so [COMMIT] and MODEL_CMD decode into the same field a plain model_cmd
+// would); to add another key, add one line here.
 var userOnlyKeys = []struct {
 	key   string
-	field func(*Config) *string
+	set   func(*Config) bool
+	clear func(*Config)
 }{
-	{key: "commit.model_cmd", field: func(c *Config) *string { return &c.Commit.ModelCmd }},
+	{key: "commit.model_cmd", set: func(c *Config) bool { return c.Commit.ModelCmd != "" }, clear: func(c *Config) { c.Commit.ModelCmd = "" }},
+	{key: "agent", set: func(c *Config) bool { return c.Agent.nonzero() }, clear: func(c *Config) { c.Agent = AgentConfig{} }},
 }
 
 // clearUserOnlyKeys zeroes user-only keys decoded from a .gittend, warning
 // about each one that was set.
 func clearUserOnlyKeys(cfg *Config, repoPath string) {
 	for _, k := range userOnlyKeys {
-		p := k.field(cfg)
-		if *p == "" {
+		if !k.set(cfg) {
 			continue
 		}
 		warnf("%s: ignoring %s from .gittend; set it in a [[repo]] entry of the user config instead", repoPath, k.key)
-		*p = ""
+		k.clear(cfg)
 	}
 }
 
@@ -389,6 +440,13 @@ func Resolve(gittendPath string, entry *RepoEntry, repoPath string) (*Config, er
 		if err := overlayEntry(&cfg, entry, repoPath); err != nil {
 			return nil, err
 		}
+	}
+
+	// Only the user entry can carry agent keys (parseRepoConfig strips them
+	// from .gittend), so its raw table alone decides whether an explicit
+	// max_attempts must be honored or the default applies.
+	if entry == nil || !rawAgentMaxAttemptsPresent(entry.Raw) {
+		cfg.Agent.MaxAttempts = DefaultAgentMaxAttempts
 	}
 
 	if err := finalizeConfig(&cfg); err != nil {
@@ -448,6 +506,26 @@ func parseRepoConfig(data []byte, gittendPath, repoPath string) (Config, error) 
 	return cfg, nil
 }
 
+// rawAgentMaxAttemptsPresent reports whether a [[repo]] entry's raw TOML
+// table carries an [repo.agent] max_attempts key. Key names are matched
+// case-insensitively, the way go-toml matches struct fields, so
+// [repo.AGENT] MAX_ATTEMPTS counts the same as repo.agent.max_attempts.
+func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
+	for k, v := range raw {
+		if !strings.EqualFold(k, "agent") {
+			continue
+		}
+		if t, ok := v.(map[string]any); ok {
+			for k2 := range t {
+				if strings.EqualFold(k2, "max_attempts") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // finalizeConfig applies built-in defaults and validation to a config.
 func finalizeConfig(cfg *Config) error {
 	if cfg.Mode == "" {
@@ -493,6 +571,29 @@ func finalizeConfig(cfg *Config) error {
 	// behave exactly like the deterministic strategy.
 	if (cfg.Commit.Strategy == "model" || cfg.Commit.Strategy == "agent") && cfg.Commit.ModelCmd == "" {
 		cfg.Commit.Strategy = "deterministic"
+	}
+
+	if cfg.Agent.Timeout != "" {
+		if _, err := time.ParseDuration(cfg.Agent.Timeout); err != nil {
+			return fmt.Errorf("invalid agent timeout %q: %w", cfg.Agent.Timeout, err)
+		}
+	}
+	if cfg.Agent.Timeout == "" {
+		cfg.Agent.Timeout = DefaultAgentTimeout
+	}
+
+	if cfg.Agent.MaxAttempts <= 0 {
+		return fmt.Errorf("invalid agent max_attempts %d: must be >= 1", cfg.Agent.MaxAttempts)
+	}
+
+	validReasons := make(map[string]bool, len(StuckReasons))
+	for _, r := range StuckReasons {
+		validReasons[r] = true
+	}
+	for _, r := range cfg.Agent.AllowedReasons {
+		if !validReasons[r] {
+			return fmt.Errorf("invalid agent allowed_reason %q: must be one of %s", r, strings.Join(StuckReasons, ", "))
+		}
 	}
 
 	return nil

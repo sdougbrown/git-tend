@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +35,8 @@ type Daemon struct {
 	stateDir          string
 	logger            *slog.Logger
 	mu                sync.Mutex
+	agentRuns         sync.WaitGroup
+	agentRunsDone     atomic.Int64
 	repos             []scan.Repo
 	offline           map[string]*offlineState
 	stuckLogged       map[string]bool
@@ -247,6 +250,7 @@ func (d *Daemon) tick(ctx context.Context) {
 			if oldState != rs.CurrentState {
 				d.maybeNotify(repo.Path, oldState, rs.CurrentState, repo.Config, "stuck flag set")
 			}
+			d.maybeRunAgent(ctx, repo)
 			continue
 		}
 
@@ -288,6 +292,8 @@ func (d *Daemon) tick(ctx context.Context) {
 			rs.SnoozedUntil = ""
 			rs.OfflineSince = ""
 			rs.ConsecutiveOfflineFailures = 0
+			rs.AgentAttempts = 0
+			rs.AgentMaxAttempts = 0
 
 		case "offline":
 			off := d.offline[repo.Path]
@@ -342,6 +348,9 @@ func (d *Daemon) tick(ctx context.Context) {
 		if result.State != "skipped" && oldState != rs.CurrentState {
 			d.maybeNotify(repo.Path, oldState, rs.CurrentState, repo.Config, rs.LastError)
 		}
+		if result.State == "stuck" {
+			d.maybeRunAgent(ctx, repo)
+		}
 	}
 
 	d.writeStatus()
@@ -388,6 +397,72 @@ func (d *Daemon) readSnooze(repoPath string) time.Time {
 	}
 
 	return t
+}
+
+// maybeRunAgent invokes the repo's configured agent unstick hook, if any, and
+// records the attempt state for status display. The agent run happens in a
+// goroutine so the serial per-repo tick loop is not blocked for up to the
+// agent timeout; the per-repo agent flock refuses a second concurrent run on
+// a later tick (it returns immediately with Ran=false), so at most one run
+// per repo is ever in flight. The status update and the status-file write
+// happen in the goroutine when the run completes, under d.mu.
+func (d *Daemon) maybeRunAgent(ctx context.Context, repo scan.Repo) {
+	if repo.Config == nil || !repo.Config.Agent.Enabled() {
+		// The agent is no longer configured: clear any budget a previous tick
+		// recorded, or status would show "agent pending" forever on a stuck
+		// repo whose on_stuck_cmd was removed. Bump UpdatedAt only when
+		// something actually changed, so the merge in writeStatus doesn't
+		// keep the stale on-disk budget over the cleared one.
+		d.mu.Lock()
+		rs := d.repoStatus[repo.Path]
+		if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+			rs.AgentAttempts = 0
+			rs.AgentMaxAttempts = 0
+			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		d.repoStatus[repo.Path] = rs
+		d.mu.Unlock()
+		return
+	}
+	d.agentRuns.Add(1)
+	go func() {
+		defer d.agentRuns.Done()
+		defer d.agentRunsDone.Add(1)
+		res := gitSync.RunStuckAgent(ctx, repo.Path, repo.Config, d.stateDir, d.logger)
+		d.mu.Lock()
+		rs, tracked := d.repoStatus[repo.Path]
+		// A rescan that dropped the repo mid-run removed its entry; storing
+		// the zero value back would resurrect it (rendered as "ok").
+		//
+		// Apply the result only when the run was engaged (MaxAttempts > 0 —
+		// a lock-refused run reports 0), the agent is still enabled at
+		// completion, and the repo is still stuck. An operator who removed
+		// on_stuck_cmd mid-run must not have the clear path's 0/0 overwritten
+		// by the orphaned result, and a repo a tick has already recovered to
+		// ok had its budget cleared by that tick.
+		// Bump UpdatedAt when the budget actually changed: on a repeat
+		// stuck tick the state is already "stuck", so tick doesn't bump,
+		// and without this the merge in writeStatus keeps the stale
+		// on-disk budget (the display freezes at 1/2 and "agent
+		// exhausted" never shows).
+		engaged := false
+		for _, r := range d.repos {
+			if r.Path == repo.Path {
+				engaged = r.Config != nil && r.Config.Agent.Enabled()
+				break
+			}
+		}
+		if tracked && engaged && rs.CurrentState == "stuck" && res.MaxAttempts > 0 && (rs.AgentAttempts != res.Attempts || rs.AgentMaxAttempts != res.MaxAttempts) {
+			rs.AgentAttempts = res.Attempts
+			rs.AgentMaxAttempts = res.MaxAttempts
+			rs.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if tracked {
+			d.repoStatus[repo.Path] = rs
+		}
+		d.mu.Unlock()
+		d.writeStatus()
+	}()
 }
 
 func (d *Daemon) maybeNotify(repoPath string, prior, current string, cfg *config.Config, reason string) {
