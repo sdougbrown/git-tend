@@ -539,7 +539,7 @@ manual-only for that repo.
 | `git-tend prompt` | Print the prompt segment directly |
 | `git-tend daemon` | Run the daemon in the foreground (used by the service; not normally called directly) |
 
-`git-tend run` requires the target repo to be opted in by a `.gittend` file or a matching `[[repo]]` entry in the user config. `git-tend unstick` validates that the path is a git repo before removing the flag.
+`git-tend run` requires the target repo to be opted in by a `.gittend` file or a matching `[[repo]]` entry in the user config. `git-tend unstick` validates that the path is a git repo before removing the flag. It does not write the daemon's status file: `git-tend status` keeps showing the repo as stuck, with any agent budget, until the daemon's next tick picks it up (at most one `interval`).
 
 `git-tend snooze` writes to a `snoozes.json` file in the state directory. A snoozed repo shows as `snoozed` in `status` output and is skipped by the daemon until the duration expires. It does not remove the snooze from the file automatically — the state will simply be ignored once the timestamp passes.
 
