@@ -671,9 +671,6 @@ func TestAgentContextCarriesDaemonObservedReason(t *testing.T) {
 	if ctx["reason"] != "hook_failed" {
 		t.Errorf("stdin context should carry the daemon-observed reason hook_failed, got: %v", ctx["reason"])
 	}
-	if got, ok := ctx["reason"]; ok && got == "push_rejected" {
-		t.Errorf("stdin context should not carry the forged file reason push_rejected")
-	}
 }
 
 // An exit-0 recovery persists the incremented attempt counter, so a new

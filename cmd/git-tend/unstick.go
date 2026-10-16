@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -101,6 +102,37 @@ func removeStuckFlag(repoPath string) error {
 		}
 	}
 
+	// The flag is already gone, so a status write failure is reported but
+	// does not fail the unstick.
+	if err := refreshStatusOnUnstick(stateDir, repoPath); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not update status for %s: %v\n", repoPath, err)
+	}
+
 	fmt.Printf("unstuck %s\n", repoPath)
 	return nil
+}
+
+// refreshStatusOnUnstick moves an existing status entry out of stuck so
+// `git-tend status` reflects the unstick before the daemon's next tick. A repo
+// the daemon has not recorded is left absent.
+func refreshStatusOnUnstick(stateDir, repoPath string) error {
+	statusPath := filepath.Join(stateDir, "status.json")
+	sf := status.Read(statusPath)
+	if sf == nil {
+		return nil
+	}
+	if _, ok := sf.Repos[repoPath]; !ok {
+		return nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return status.UpdateRepo(statusPath, repoPath, func(rs status.RepoStatus) status.RepoStatus {
+		rs.PriorState = rs.CurrentState
+		rs.CurrentState = "pending"
+		rs.StuckSince = ""
+		rs.AgentAttempts = 0
+		rs.AgentMaxAttempts = 0
+		rs.UpdatedAt = now
+		return rs
+	})
 }

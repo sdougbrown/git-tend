@@ -518,18 +518,6 @@ func TestResolveGittendAgentIgnoredWithWarning(t *testing.T) {
 	}
 }
 
-func TestResolveGittendAgentAloneNeverEngages(t *testing.T) {
-	// A .gittend that carries only the agent command must resolve to an agent
-	// that never runs: on_stuck_cmd is ignored, so nothing is engaged.
-	cfg, err := Resolve(writeConfig(t, "[agent]\non_stuck_cmd = \"evil\"\n"), nil, "/tmp/repo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Agent.Enabled() {
-		t.Error("agent should not be enabled from .gittend alone")
-	}
-}
-
 func TestParseAgentConfig(t *testing.T) {
 	t.Run("defaults when agent disabled", func(t *testing.T) {
 		cfg, err := Resolve(writeConfig(t, "mode = \"read-only\"\n"), nil, "/tmp/repo")

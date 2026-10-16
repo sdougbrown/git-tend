@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/git-tend/internal/paths"
+	"github.com/sdougbrown/git-tend/internal/status"
 	gitSync "github.com/sdougbrown/git-tend/internal/sync"
 )
 
@@ -116,6 +117,70 @@ func TestRemoveStuckFlagWithoutAgentState(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); !os.IsNotExist(err) {
 		t.Error("stuck flag should be removed")
+	}
+}
+
+func TestRemoveStuckFlagRefreshesStatus(t *testing.T) {
+	repo, stateDir := setupStuckRepoWithAgentState(t)
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(stateDir, "status.json")
+	const seeded = "2026-10-14T00:00:00Z"
+	if err := status.Write(statusPath, &status.StatusFile{Version: 1, Repos: map[string]status.RepoStatus{
+		repo: {CurrentState: "stuck", StuckSince: seeded, AgentAttempts: 2, AgentMaxAttempts: 2, UpdatedAt: seeded},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeStuckFlag(repo); err != nil {
+		t.Fatalf("removeStuckFlag: %v", err)
+	}
+
+	rs, ok := status.Read(statusPath).Repos[repo]
+	if !ok {
+		t.Fatal("status entry should still exist")
+	}
+	if rs.CurrentState != "pending" {
+		t.Errorf("CurrentState = %q, want pending", rs.CurrentState)
+	}
+	if rs.PriorState != "stuck" {
+		t.Errorf("PriorState = %q, want stuck", rs.PriorState)
+	}
+	if rs.StuckSince != "" {
+		t.Errorf("StuckSince = %q, want empty", rs.StuckSince)
+	}
+	if rs.AgentAttempts != 0 || rs.AgentMaxAttempts != 0 {
+		t.Errorf("agent budget = %d/%d, want 0/0", rs.AgentAttempts, rs.AgentMaxAttempts)
+	}
+	if rs.UpdatedAt == seeded {
+		t.Error("UpdatedAt should be bumped so the daemon merge keeps this write")
+	}
+}
+
+func TestRemoveStuckFlagDoesNotCreateStatusEntry(t *testing.T) {
+	repo, stateDir := setupStuckRepoWithAgentState(t)
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(stateDir, "status.json")
+	other := t.TempDir()
+	if err := status.Write(statusPath, &status.StatusFile{Version: 1, Repos: map[string]status.RepoStatus{
+		other: {CurrentState: "ok"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeStuckFlag(repo); err != nil {
+		t.Fatalf("removeStuckFlag: %v", err)
+	}
+
+	sf := status.Read(statusPath)
+	if _, ok := sf.Repos[repo]; ok {
+		t.Error("unstick must not create a status entry for a repo the daemon has not recorded")
+	}
+	if len(sf.Repos) != 1 {
+		t.Errorf("status entries = %d, want 1", len(sf.Repos))
 	}
 }
 
