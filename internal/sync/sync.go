@@ -174,18 +174,15 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 
 	// In folder-scoped write mode git-tend adds only the [include] paths minus
-	// the [exclude] paths, but commits the whole index. Staged paths outside
-	// that combination belong to a commit someone else is preparing, so leave
-	// the repo alone for this tick and resume once the index is clear. Staged
-	// paths git-tend would have staged itself are indistinguishable from its own
-	// work, and are fair game. With no [include] paths git-tend stages
-	// everything anyway, so nothing can be outside the scope.
-	var invertedScope []string
-	if len(cfg.Include.Paths) > 0 {
-		invertedScope = translateExcludePaths(cfg.Include.Paths)
-	}
+	// the [exclude] paths, but commits the whole index. Staged work outside that
+	// combination belongs to a commit someone else is preparing, so leave the
+	// repo alone for this tick and resume once the index is clear. Staged paths
+	// git-tend would have staged itself are indistinguishable from its own work,
+	// and are fair game. An [exclude] with no [include] still narrows the
+	// staging, so it is checked on its own.
+	invertedScope := translateExcludePaths(cfg.Include.Paths)
 	stagedOutsideScope := func() (bool, error) {
-		if len(invertedScope) == 0 {
+		if len(invertedScope) == 0 && len(cfg.Exclude.Paths) == 0 {
 			return false, nil
 		}
 		return git.StagedOutsideScope(repoPath, invertedScope, cfg.Exclude.Paths)

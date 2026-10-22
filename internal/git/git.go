@@ -93,11 +93,14 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 // StagedOutsideScope reports whether the index holds staged changes that
 // git-tend's own staging would not cover: paths outside the write scope
 // (invertSpecs, exclude pathspecs naming that scope), or paths it deliberately
-// leaves out (skipSpecs, positive pathspecs). Nothing staged means nothing to
-// protect.
+// leaves out (skipSpecs, positive pathspecs). Empty invertSpecs means no
+// include restriction, so everything is inside the scope. Nothing staged means
+// nothing to protect.
 func StagedOutsideScope(repoPath string, invertSpecs, skipSpecs []string) (bool, error) {
-	if outside, err := stagedMatching(repoPath, invertSpecs); err != nil || outside {
-		return outside, err
+	if len(invertSpecs) > 0 {
+		if outside, err := stagedMatching(repoPath, invertSpecs); err != nil || outside {
+			return outside, err
+		}
 	}
 	if len(skipSpecs) == 0 {
 		return false, nil

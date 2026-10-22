@@ -1485,3 +1485,60 @@ func TestSyncRechecksStagedPathsBeforeCommit(t *testing.T) {
 		}
 	}
 }
+
+// [exclude] without [include] narrows the staging too: git-tend stages
+// everything but those paths, and the commit still takes the whole index.
+func TestSyncSkipsWhenStagedExcludedWithoutInclude(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	for _, d := range []string{"src", "secrets"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", nil, []string{"secrets/"})
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "secrets", "key.pem"), []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", "secrets/key.pem")
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Exclude: config.ExcludeConfig{Paths: []string{"secrets/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" {
+		t.Fatalf("expected skipped (staged exclude path), got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	for _, p := range []string{"secrets/key.pem", "src/keep.txt"} {
+		if _, err := os.Stat(filepath.Join(clone2, p)); err == nil {
+			t.Errorf("%s should not be committed while an exclude path is staged", p)
+		}
+	}
+}

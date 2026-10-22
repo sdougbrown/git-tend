@@ -314,7 +314,9 @@ no_verify = false
 paths = ["src/", "config/"]
 
 [exclude]
-# Exclude these paths from staging. Uses git pathspec syntax.
+# Exclude these paths from staging. Uses git pathspec syntax. Staged work under
+# an excluded path is not git-tend's to commit either, so it backs the tick off
+# the same way staged work outside [include] does.
 paths = ["secrets/", "*.log"]
 
 [notify]

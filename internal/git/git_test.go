@@ -361,6 +361,43 @@ func TestStagedOutsideScope(t *testing.T) {
 	}
 }
 
+// With no [include] the staging is everything minus the [exclude] paths, so an
+// empty inversion must mean "everything is inside the scope" rather than
+// "nothing is".
+func TestStagedOutsideScopeWithoutInclude(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	for _, d := range []string{"src", "secrets"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"src/a.txt", "secrets/key.pem"} {
+		if err := os.WriteFile(filepath.Join(repo, f), []byte(f), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	outside := func() bool {
+		t.Helper()
+		got, err := StagedOutsideScope(repo, nil, []string{"secrets/"})
+		if err != nil {
+			t.Fatalf("StagedOutsideScope() error: %v", err)
+		}
+		return got
+	}
+
+	run(t, repo, "add", "src/a.txt")
+	if outside() {
+		t.Error("StagedOutsideScope() = true for a staged path outside the exclude, want false")
+	}
+
+	run(t, repo, "add", "secrets/key.pem")
+	if !outside() {
+		t.Error("StagedOutsideScope() = false for a staged exclude path, want true")
+	}
+}
+
 func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
 	if _, err := StagedOutsideScope(t.TempDir(), []string{":(exclude)src/"}, nil); err == nil {
 		t.Error("StagedOutsideScope() = nil error outside a git repo, want an error")
