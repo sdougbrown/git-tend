@@ -178,15 +178,23 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// that combination belong to a commit someone else is preparing, so leave
 	// the repo alone for this tick and resume once the index is clear. Staged
 	// paths git-tend would have staged itself are indistinguishable from its own
-	// work, and are fair game.
+	// work, and are fair game. With no [include] paths git-tend stages
+	// everything anyway, so nothing can be outside the scope.
+	var invertedScope []string
 	if len(cfg.Include.Paths) > 0 {
-		outside, err := git.StagedOutsideScope(repoPath, translateExcludePaths(cfg.Include.Paths), cfg.Exclude.Paths)
-		if err != nil {
-			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
+		invertedScope = translateExcludePaths(cfg.Include.Paths)
+	}
+	stagedOutsideScope := func() (bool, error) {
+		if len(invertedScope) == 0 {
+			return false, nil
 		}
-		if outside {
-			return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
-		}
+		return git.StagedOutsideScope(repoPath, invertedScope, cfg.Exclude.Paths)
+	}
+
+	if outside, err := stagedOutsideScope(); err != nil {
+		return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
+	} else if outside {
+		return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
 	}
 
 	files, err := git.ListTrackedFiles(repoPath)
@@ -292,6 +300,15 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 			msg = commit.GenerateWithModel(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh, cfg.Commit.ModelCmd, modelTimeout, modelStdin)
 		default:
 			msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
+		}
+		// A model or agent run can hold the tick open for model_timeout, so
+		// staging that happens during it is invisible to the tick-start check.
+		// Re-check immediately before committing: the commit takes the whole
+		// index, so one staged out-of-scope path would sweep it in.
+		if outside, err := stagedOutsideScope(); err != nil {
+			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
+		} else if outside {
+			return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
 		}
 		if err := git.Commit(repoPath, msg, cfg.Commit.NoVerify); err != nil {
 			return stuckResult(err, writeStuck(stateDir, repoPath, "hook_failed", "git commit", exitCodeFromErr(err), err.Error()), "commit")

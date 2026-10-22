@@ -1403,9 +1403,85 @@ func TestSyncGlobIncludeScope(t *testing.T) {
 		t.Fatalf("expected ok once the index cleared, got %s: %s", result.State, result.Error)
 	}
 
+	// Staged work matching the glob is in scope, so the tick commits it. This
+	// is the tick that catches a broken inversion: a pathspec that matches
+	// nothing reports every staged path as outside, which skips here.
+	if err := os.WriteFile(filepath.Join(repo, "projects", "alpha", "memory", "staged.md"), []byte("staged"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", "projects/alpha/memory/staged.md")
+	result = Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok for in-scope staged work, got %s: %s", result.State, result.Error)
+	}
+
 	clone2 := gitClone(t, remote)
 	defer os.RemoveAll(clone2)
-	if _, err := os.Stat(filepath.Join(clone2, "projects", "alpha", "memory", "note.md")); err != nil {
-		t.Error("glob-scoped note.md should be committed once the foreign staging is gone")
+	for _, p := range []string{"projects/alpha/memory/note.md", "projects/alpha/memory/staged.md"} {
+		if _, err := os.Stat(filepath.Join(clone2, p)); err != nil {
+			t.Errorf("%s should be committed under the glob scope", p)
+		}
+	}
+}
+
+// A model or agent run keeps the tick open long enough for a human to stage
+// out-of-scope work after the tick-start check. The commit takes the whole
+// index, so the guard runs again immediately before it.
+func TestSyncRechecksStagedPathsBeforeCommit(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	for _, d := range []string{"src", "outside"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"src/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Work in git-tend's own scope, so this tick has something to commit.
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The human stages outside the scope while the model is authoring the
+	// message: the model command performs the staging as a side effect.
+	if err := os.WriteFile(filepath.Join(repo, "outside", "notes.txt"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji:    "🐌",
+			Strategy: "model",
+			ModelCmd: "git -C " + repo + " add outside/notes.txt && echo 'sync things'",
+		},
+		Include: config.IncludeConfig{Paths: []string{"src/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" {
+		t.Fatalf("expected skipped (staging appeared mid-tick), got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	for _, p := range []string{"outside/notes.txt", "src/keep.txt"} {
+		if _, err := os.Stat(filepath.Join(clone2, p)); err == nil {
+			t.Errorf("%s should not be committed when staging appeared mid-tick", p)
+		}
 	}
 }
