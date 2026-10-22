@@ -296,6 +296,9 @@ func TestIsNetworkError(t *testing.T) {
 func TestStagedOutsideScope(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "init", "-q")
+	// CI runners ship without a default identity, so the commit below needs one.
+	run(t, repo, "config", "user.name", "git-tend test")
+	run(t, repo, "config", "user.email", "test@gittend.local")
 	for _, d := range []string{"memory", "notes", "src/secrets", "projects/x/memory"} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
 			t.Fatal(err)
