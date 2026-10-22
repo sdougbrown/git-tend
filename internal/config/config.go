@@ -527,6 +527,27 @@ func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
 }
 
 // finalizeConfig applies built-in defaults and validation to a config.
+// isNegativePathspec reports whether p leaves paths out, in either magic form:
+// the short :! and :^ forms, or :(...) listing exclude or negative.
+func isNegativePathspec(p string) bool {
+	if strings.HasPrefix(p, ":!") || strings.HasPrefix(p, ":^") {
+		return true
+	}
+	if !strings.HasPrefix(p, ":(") {
+		return false
+	}
+	end := strings.Index(p, ")")
+	if end < 0 {
+		return false
+	}
+	for _, m := range strings.Split(p[2:end], ",") {
+		if m == "exclude" || m == "negative" {
+			return true
+		}
+	}
+	return false
+}
+
 func finalizeConfig(cfg *Config) error {
 	if cfg.Mode == "" {
 		cfg.Mode = "read-only"
@@ -561,6 +582,25 @@ func finalizeConfig(cfg *Config) error {
 		cfg.Commit.Emoji = "🐌"
 	}
 
+	// The auto-commit guard inverts [include] to find staged work git-tend would
+	// not have staged, which only holds for positive pathspecs: a negative one
+	// inverts to a spec matching nothing, and an exclude-only list that matches
+	// nothing covers the whole tree, so every staged path would read as foreign.
+	// A negative pathspec is only ever shorthand for lining up an [exclude]
+	// entry, which composes with the guard.
+	for _, scope := range []struct {
+		key   string
+		paths []string
+	}{
+		{"include", cfg.Include.Paths},
+		{"exclude", cfg.Exclude.Paths},
+	} {
+		for _, p := range scope.paths {
+			if isNegativePathspec(p) {
+				return fmt.Errorf("invalid %s path %q: negative pathspecs are not supported, list the paths to leave out under [exclude] instead", scope.key, p)
+			}
+		}
+	}
 	if cfg.Commit.Strategy == "" {
 		cfg.Commit.Strategy = "deterministic"
 	}

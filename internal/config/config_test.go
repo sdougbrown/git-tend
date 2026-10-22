@@ -665,3 +665,42 @@ on_stuck_cmd = "true"
 		t.Errorf("MaxAttempts = %d, want 4 (earlier entry kept)", resolved.Agent.MaxAttempts)
 	}
 }
+
+func TestResolveRejectsNegativePathspecs(t *testing.T) {
+	// A negative pathspec inverts to a spec matching nothing, which would make
+	// the auto-commit scope guard treat every staged path as foreign. [exclude]
+	// expresses the same intent and composes.
+	for _, tc := range []struct {
+		name  string
+		value string
+		scope string
+	}{
+		{"include short bang", ":!docs/", "include"},
+		{"include short caret", ":^docs/", "include"},
+		{"include long form", ":(exclude)docs/", "include"},
+		{"include long form with glob", ":(exclude,glob)docs/*", "include"},
+		{"include negative word", ":(negative)docs/", "include"},
+		{"exclude short bang", ":!docs/", "exclude"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gittend := writeConfig(t, "["+tc.scope+"]\npaths = [\"src/\", \""+tc.value+"\"]\n")
+			_, err := Resolve(gittend, nil, "/tmp/repo")
+			if err == nil || !strings.Contains(err.Error(), "negative pathspecs are not supported") {
+				t.Fatalf("expected a negative-pathspec error, got: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.scope+" path") {
+				t.Errorf("error should name the %s key, got: %v", tc.scope, err)
+			}
+		})
+	}
+
+	// Positive specs, including magic ones, still parse.
+	gittend := writeConfig(t, "[include]\npaths = [\"src/\", \":(glob)projects/*/memory/*\"]\n[exclude]\npaths = [\"secrets/\"]\n")
+	cfg, err := Resolve(gittend, nil, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if len(cfg.Include.Paths) != 2 {
+		t.Errorf("Include.Paths = %v, want both positive specs kept", cfg.Include.Paths)
+	}
+}

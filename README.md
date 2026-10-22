@@ -311,12 +311,16 @@ no_verify = false
 # scope are indistinguishable from git-tend's own work and get committed.
 # `git-tend run` does not bypass this: a skip means the index holds work
 # git-tend was not going to stage.
+#
+# Negative pathspecs (:!/:^/:(exclude)) are rejected: the guard inverts this
+# list to find staged work outside it, which only holds for positive specs. List
+# the paths to leave out under [exclude] instead.
 paths = ["src/", "config/"]
 
 [exclude]
-# Exclude these paths from staging. Uses git pathspec syntax. Staged work under
-# an excluded path is not git-tend's to commit either, so it backs the tick off
-# the same way staged work outside [include] does.
+# Exclude these paths from staging. Uses git pathspec syntax, positive specs
+# only. Staged work under an excluded path is not git-tend's to commit either,
+# so it backs the tick off the same way staged work outside [include] does.
 paths = ["secrets/", "*.log"]
 
 [notify]
