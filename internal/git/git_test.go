@@ -364,8 +364,8 @@ func TestStagedOutsideScope(t *testing.T) {
 	}
 }
 
-// With no [include] the staging is everything minus the [exclude] paths, so an
-// empty inversion must mean "everything is inside the scope" rather than
+// With no [include] the staging is everything minus the [exclude] paths. An
+// empty inversion therefore has to mean "everything is inside the scope", not
 // "nothing is".
 func TestStagedOutsideScopeWithoutInclude(t *testing.T) {
 	repo := t.TempDir()

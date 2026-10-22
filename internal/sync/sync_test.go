@@ -1154,10 +1154,9 @@ func TestSyncDeterministicStrategyNoPromptSendsFullDiff(t *testing.T) {
 }
 
 // In folder-scoped write mode, git-tend's `git add` is limited to [include]
-// paths but its commit takes the whole index, so a human's staged work would
-// otherwise ride along under a generated message. A tick that finds staged
-// paths outside the scope leaves the repo alone and resumes once the index
-// clears.
+// paths but its commit takes the whole index. A human's staged work otherwise
+// rides along under a generated message. A tick that finds staged paths outside
+// the scope leaves the repo alone and resumes once the index clears.
 func TestSyncSkipsWhenStagedOutsideScope(t *testing.T) {
 	remote := gitInitBare(t)
 	defer os.RemoveAll(remote)
@@ -1180,7 +1179,7 @@ func TestSyncSkipsWhenStagedOutsideScope(t *testing.T) {
 	}
 	testGitOK(t, repo, "add", "outside/notes.txt")
 
-	// The scope is dirty too, so this tick would otherwise commit.
+	// The scope is dirty too, so this tick has something of its own to commit.
 	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1294,8 +1293,8 @@ func TestSyncCommitsWhenStagedInScopeOnly(t *testing.T) {
 }
 
 // A path git-tend deliberately excludes is outside its write scope, so staged
-// work there is someone else's too. Without this the tick would proceed and the
-// commit — which takes the whole index — would push it.
+// work there is someone else's too. Without the exclude probe the tick proceeds
+// and the commit, which takes the whole index, pushes it.
 func TestSyncSkipsWhenStagedExcluded(t *testing.T) {
 	remote := gitInitBare(t)
 	defer os.RemoveAll(remote)

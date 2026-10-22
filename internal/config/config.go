@@ -582,12 +582,12 @@ func finalizeConfig(cfg *Config) error {
 		cfg.Commit.Emoji = "🐌"
 	}
 
-	// The auto-commit guard inverts [include] to find staged work git-tend would
-	// not have staged, which only holds for positive pathspecs: a negative one
-	// inverts to a spec matching nothing, and an exclude-only list that matches
-	// nothing covers the whole tree, so every staged path would read as foreign.
-	// A negative pathspec is only ever shorthand for lining up an [exclude]
-	// entry, which composes with the guard.
+	// The auto-commit guard inverts [include] to find staged work git-tend does
+	// not stage itself, and that only holds for positive pathspecs. A negative
+	// one inverts to a spec matching nothing; an exclude-only list that matches
+	// nothing covers the whole tree. Every staged path then reads as foreign. A
+	// negative pathspec only ever stands in for an [exclude] entry, which
+	// composes with the guard.
 	for _, scope := range []struct {
 		key   string
 		paths []string

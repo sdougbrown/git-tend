@@ -175,11 +175,11 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 
 	// In folder-scoped write mode git-tend adds only the [include] paths minus
 	// the [exclude] paths, but commits the whole index. Staged work outside that
-	// combination belongs to a commit someone else is preparing, so leave the
-	// repo alone for this tick and resume once the index is clear. Staged paths
-	// git-tend would have staged itself are indistinguishable from its own work,
-	// and are fair game. An [exclude] with no [include] still narrows the
-	// staging, so it is checked on its own.
+	// combination belongs to a commit someone else is preparing. Leave the repo
+	// alone for this tick, and resume once the index clears. Staged work inside
+	// the scope is indistinguishable from git-tend's own, and is fair game. An
+	// [exclude] with no [include] still narrows the staging, so it is checked on
+	// its own.
 	invertedScope := translateExcludePaths(cfg.Include.Paths)
 	stagedOutsideScope := func() (bool, error) {
 		if len(invertedScope) == 0 && len(cfg.Exclude.Paths) == 0 {
@@ -301,7 +301,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		// A model or agent run can hold the tick open for model_timeout, so
 		// staging that happens during it is invisible to the tick-start check.
 		// Re-check immediately before committing: the commit takes the whole
-		// index, so one staged out-of-scope path would sweep it in.
+		// index, so one staged out-of-scope path can end up in it.
 		if outside, err := stagedOutsideScope(); err != nil {
 			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
 		} else if outside {
