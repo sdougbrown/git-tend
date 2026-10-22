@@ -1152,3 +1152,137 @@ func TestSyncDeterministicStrategyNoPromptSendsFullDiff(t *testing.T) {
 		t.Errorf("expected full diff with no composed prompt on model stdin, got:\n%s", log)
 	}
 }
+
+// In folder-scoped write mode, git-tend's `git add` is limited to [include]
+// paths but its commit takes the whole index, so a human's staged work would
+// otherwise ride along under a generated message. A tick that finds staged
+// paths outside the scope leaves the repo alone and resumes once the index
+// clears.
+func TestSyncSkipsWhenStagedOutsideScope(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	for _, d := range []string{"src", "outside"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"src/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Someone stages work of their own outside the write scope.
+	if err := os.WriteFile(filepath.Join(repo, "outside", "notes.txt"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", "outside/notes.txt")
+
+	// The scope is dirty too, so this tick would otherwise commit.
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"src/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" || result.Error != "staged changes outside the write scope" {
+		t.Fatalf("expected skipped (staged outside write scope), got %s: %s", result.State, result.Error)
+	}
+
+	// Nothing leaves the repo: neither the foreign staging nor our scope.
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	for _, p := range []string{"outside/notes.txt", "src/keep.txt"} {
+		if _, err := os.Stat(filepath.Join(clone2, p)); err == nil {
+			t.Errorf("%s should not be committed while a foreign staging is present", p)
+		}
+	}
+
+	// The index must be left exactly as the human staged it, not topped up
+	// with our scope.
+	staged := strings.TrimSpace(testGit(t, repo, "diff", "--cached", "--name-only"))
+	if staged != "outside/notes.txt" {
+		t.Errorf("staged = %q, want only the human's staging", staged)
+	}
+
+	// Once their commit lands the next tick carries on as normal.
+	testGitOK(t, repo, "commit", "-m", "manual commit")
+	result = Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok once the index cleared, got %s: %s", result.State, result.Error)
+	}
+
+	clone3 := gitClone(t, remote)
+	defer os.RemoveAll(clone3)
+	if _, err := os.Stat(filepath.Join(clone3, "src", "keep.txt")); err != nil {
+		t.Error("src/keep.txt should be committed once the foreign staging is gone")
+	}
+}
+
+// Staging inside the write scope is indistinguishable from git-tend's own work
+// and is fair game: the tick commits it.
+func TestSyncCommitsWhenStagedInScopeOnly(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"src/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", "src/keep.txt")
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"src/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "keep.txt")); err != nil {
+		t.Error("src/keep.txt should be committed when all staging is in scope")
+	}
+}

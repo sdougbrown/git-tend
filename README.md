@@ -302,6 +302,15 @@ no_verify = false
 
 [include]
 # Stage only these paths (relative to repo root). If empty, stages everything.
+#
+# Staging is scoped but committing is not: git-tend commits the index, so with
+# paths set it only ever adds its own scope to it. Anything already staged
+# outside these paths therefore belongs to a commit someone is preparing by
+# hand, and the tick is skipped — temporary, not stuck, and nothing to unstick.
+# The next tick resumes once the index is clear again. Staged paths inside the
+# scope are indistinguishable from git-tend's own work and get committed.
+# `git-tend run` does not bypass this: a skip means the index holds work
+# git-tend was not going to stage.
 paths = ["src/", "config/"]
 
 [exclude]
@@ -400,7 +409,8 @@ With `strategy = "agent"` the configured command becomes a **message author**,
 not an executor. The daemon — never the agent — runs every git command:
 
 1. The usual guards run first: per-repo flock, git lock check,
-   `in_progress_window` back-off, debounce quiet-time check.
+   `in_progress_window` back-off, staged-outside-scope check, debounce
+   quiet-time check.
 2. Changes are staged (`git add`), and the **full** staged diff is captured
    (`git diff --cached`, capped at 16 KiB with a truncation note).
 3. The agent command runs with `repo:`, `branch:`, the diff, and the prompt on
