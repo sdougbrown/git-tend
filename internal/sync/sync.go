@@ -173,13 +173,14 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		}
 	}
 
-	// In folder-scoped write mode git-tend adds only the [include] paths but
-	// commits the whole index, so staged paths outside that scope belong to a
-	// commit someone else is preparing. Leave the repo alone for this tick: the
-	// next one resumes once the index is clear. Staging inside the scope is
-	// indistinguishable from git-tend's own work, and is fair game.
+	// In folder-scoped write mode git-tend adds only the [include] paths minus
+	// the [exclude] paths, but commits the whole index. Staged paths outside
+	// that combination belong to a commit someone else is preparing, so leave
+	// the repo alone for this tick and resume once the index is clear. Staged
+	// paths git-tend would have staged itself are indistinguishable from its own
+	// work, and are fair game.
 	if len(cfg.Include.Paths) > 0 {
-		outside, err := git.StagedOutside(repoPath, translateExcludePaths(cfg.Include.Paths))
+		outside, err := git.StagedOutsideScope(repoPath, translateExcludePaths(cfg.Include.Paths), cfg.Exclude.Paths)
 		if err != nil {
 			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
 		}

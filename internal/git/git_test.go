@@ -293,48 +293,76 @@ func TestIsNetworkError(t *testing.T) {
 	}
 }
 
-func TestStagedOutside(t *testing.T) {
+func TestStagedOutsideScope(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "init", "-q")
-	for _, d := range []string{"memory", "notes", "projects/x/memory"} {
+	for _, d := range []string{"memory", "notes", "src/secrets", "projects/x/memory"} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, f := range []string{"memory/a.txt", "notes/b.txt", "projects/x/memory/c.txt"} {
+	for _, f := range []string{"memory/a.txt", "notes/b.txt", "src/secrets/key.pem", "projects/x/memory/c.txt"} {
 		if err := os.WriteFile(filepath.Join(repo, f), []byte(f), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Same translation the sync loop feeds it: exclude pathspecs derived from
-	// the configured write scope, including a magic-prefixed glob.
+
+	// The write scope is memory/ plus a magic-prefixed glob, minus src/secrets/.
 	outside := func() bool {
 		t.Helper()
-		got, err := StagedOutside(repo, []string{":(exclude)memory/", ":(exclude,glob)projects/*/memory/*"})
+		got, err := StagedOutsideScope(repo,
+			[]string{":(exclude)memory/", ":(exclude,glob)projects/*/memory/*"},
+			[]string{"src/secrets/"})
 		if err != nil {
-			t.Fatalf("StagedOutside() error: %v", err)
+			t.Fatalf("StagedOutsideScope() error: %v", err)
 		}
 		return got
 	}
 
 	// Nothing staged: nothing to protect.
 	if outside() {
-		t.Error("StagedOutside() = true with an empty index")
+		t.Error("StagedOutsideScope() = true with an empty index")
 	}
 
 	// Only the write scope staged, plain and glob.
 	run(t, repo, "add", "memory/a.txt")
 	if outside() {
-		t.Error("StagedOutside() = true for a staged path inside the scope")
+		t.Error("StagedOutsideScope() = true for a staged path inside the scope")
 	}
 	run(t, repo, "add", "projects/x/memory/c.txt")
 	if outside() {
-		t.Error("StagedOutside() = true for a glob-scoped staged path")
+		t.Error("StagedOutsideScope() = true for a glob-scoped staged path")
 	}
 
 	// A file outside the scope, on top of in-scope staging.
 	run(t, repo, "add", "notes/b.txt")
 	if !outside() {
-		t.Error("StagedOutside() = false for a staged path outside the scope")
+		t.Error("StagedOutsideScope() = false for a staged path outside the scope")
+	}
+	run(t, repo, "reset", "-q", "notes/b.txt")
+
+	// A path git-tend deliberately excludes is outside the scope even when the
+	// include paths cover it, because its own `git add` subtracts the exclude.
+	run(t, repo, "add", "src/secrets/key.pem")
+	if !outside() {
+		t.Error("StagedOutsideScope() = false for a staged path matching [exclude]")
+	}
+	run(t, repo, "reset", "-q", "src/secrets/key.pem")
+
+	// A staged deletion carries the deleted path, so it is caught too.
+	run(t, repo, "add", "notes/b.txt")
+	run(t, repo, "commit", "-q", "-m", "track notes/b.txt")
+	if err := os.Remove(filepath.Join(repo, "notes", "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "add", "-A", "notes/b.txt")
+	if !outside() {
+		t.Error("StagedOutsideScope() = false for a staged deletion outside the scope")
+	}
+}
+
+func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
+	if _, err := StagedOutsideScope(t.TempDir(), []string{":(exclude)src/"}, nil); err == nil {
+		t.Error("StagedOutsideScope() = nil error outside a git repo, want an error")
 	}
 }

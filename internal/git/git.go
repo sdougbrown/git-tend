@@ -90,14 +90,27 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 	return string(out), err
 }
 
-// StagedOutside reports whether the index holds staged changes that the given
-// exclude pathspecs don't cover. Exclude-only pathspecs apply to the whole
-// tree, so passing the inverse of a write scope answers "is anything staged
-// outside the paths git-tend would have added itself". No pathspecs at all
-// means nothing is in scope, so any staged change is outside it.
-func StagedOutside(repoPath string, excludeSpecs []string) (bool, error) {
+// StagedOutsideScope reports whether the index holds staged changes that
+// git-tend's own staging would not cover: paths outside the write scope
+// (invertSpecs, exclude pathspecs naming that scope), or paths it deliberately
+// leaves out (skipSpecs, positive pathspecs). Nothing staged means nothing to
+// protect.
+func StagedOutsideScope(repoPath string, invertSpecs, skipSpecs []string) (bool, error) {
+	if outside, err := stagedMatching(repoPath, invertSpecs); err != nil || outside {
+		return outside, err
+	}
+	if len(skipSpecs) == 0 {
+		return false, nil
+	}
+	return stagedMatching(repoPath, skipSpecs)
+}
+
+// stagedMatching reports whether anything is staged under the given pathspecs.
+// Exclude-only pathspecs apply to the whole tree, so an inverted scope works as
+// an "outside" test.
+func stagedMatching(repoPath string, specs []string) (bool, error) {
 	args := []string{"-C", repoPath, "diff", "--cached", "--name-only", "-z", "--"}
-	args = append(args, excludeSpecs...)
+	args = append(args, specs...)
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		return false, err

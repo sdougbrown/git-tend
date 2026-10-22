@@ -1258,6 +1258,12 @@ func TestSyncCommitsWhenStagedInScopeOnly(t *testing.T) {
 	}
 	testGitOK(t, repo, "add", "src/keep.txt")
 
+	// Untracked work outside the scope is not staged work, so it must not block
+	// the tick.
+	if err := os.WriteFile(filepath.Join(repo, "outside-scope.txt"), []byte("untracked"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	stateDir, err := os.MkdirTemp("", "gittend-state-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1284,5 +1290,122 @@ func TestSyncCommitsWhenStagedInScopeOnly(t *testing.T) {
 	defer os.RemoveAll(clone2)
 	if _, err := os.Stat(filepath.Join(clone2, "src", "keep.txt")); err != nil {
 		t.Error("src/keep.txt should be committed when all staging is in scope")
+	}
+}
+
+// A path git-tend deliberately excludes is outside its write scope, so staged
+// work there is someone else's too. Without this the tick would proceed and the
+// commit — which takes the whole index — would push it.
+func TestSyncSkipsWhenStagedExcluded(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	for _, d := range []string{"src", "src/secrets"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"src/"}, []string{"src/secrets/"})
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Inside the include paths, but excluded from git-tend's staging.
+	if err := os.WriteFile(filepath.Join(repo, "src", "secrets", "key.pem"), []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", "src/secrets/key.pem")
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"src/"}},
+		Exclude: config.ExcludeConfig{Paths: []string{"src/secrets/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" {
+		t.Fatalf("expected skipped (staged exclude path), got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "secrets", "key.pem")); err == nil {
+		t.Error("excluded src/secrets/key.pem must not be committed")
+	}
+}
+
+// Magic-prefixed include pathspecs must survive the inversion the guard builds
+// from them; a regression there makes every scoped tick fail.
+func TestSyncGlobIncludeScope(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	for _, d := range []string{"notes", "projects/alpha/memory"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	include := []string{":(glob)projects/*/memory/*"}
+	writeTestConfig(t, repo, "read-write", "main", "0s", include, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "notes", "scratch.md"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", "notes/scratch.md")
+	if err := os.WriteFile(filepath.Join(repo, "projects", "alpha", "memory", "note.md"), []byte("scoped"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: include},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" {
+		t.Fatalf("expected skipped (staged outside glob scope), got %s: %s", result.State, result.Error)
+	}
+
+	testGitOK(t, repo, "commit", "-m", "manual commit")
+	result = Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok once the index cleared, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "projects", "alpha", "memory", "note.md")); err != nil {
+		t.Error("glob-scoped note.md should be committed once the foreign staging is gone")
 	}
 }
