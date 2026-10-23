@@ -1613,3 +1613,70 @@ func TestSyncNegativeIncludeScope(t *testing.T) {
 		t.Error("src/keep.txt is in the negative include scope and should be committed")
 	}
 }
+
+// The same re-check in exclude-only mode. The unstage must remove the tick's own
+// staging, which here is the whole tree minus the excludes, without touching the
+// human's excluded staging. Its `git reset` pathspec set differs from the
+// include-scoped variant.
+func TestSyncRechecksStagedPathsWithExcludeOnly(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	for _, d := range []string{"notes", "src"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", nil, []string{"notes/"})
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// In git-tend's scope, so this tick has something of its own to stage.
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The human stages an excluded path while the model authors the message.
+	if err := os.WriteFile(filepath.Join(repo, "notes", "scratch.md"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji:    "🐌",
+			Strategy: "model",
+			ModelCmd: "git -C " + repo + " add notes/scratch.md && echo 'sync things'",
+		},
+		Exclude: config.ExcludeConfig{Paths: []string{"notes/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" {
+		t.Fatalf("expected skipped (staging appeared mid-tick), got %s: %s", result.State, result.Error)
+	}
+
+	staged := strings.TrimSpace(testGit(t, repo, "diff", "--cached", "--name-only"))
+	if staged != "notes/scratch.md" {
+		t.Errorf("staged = %q, want only the human's excluded staging", staged)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	for _, p := range []string{"notes/scratch.md", "src/keep.txt"} {
+		if _, err := os.Stat(filepath.Join(clone2, p)); err == nil {
+			t.Errorf("%s should not be committed when staging appeared mid-tick", p)
+		}
+	}
+}

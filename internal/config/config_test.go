@@ -680,13 +680,21 @@ func TestResolveRejectsNegativeExcludePathspecs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gittend := writeConfig(t, "[exclude]\npaths = [\""+tc.value+"\"]\n")
 			_, err := Resolve(gittend, nil, "/tmp/repo")
-			if err == nil || !strings.Contains(err.Error(), "negative pathspecs are contradictory") {
-				t.Fatalf("expected a negative-pathspec error, got: %v", err)
+			if err == nil {
+				t.Fatalf("expected an error for the negative exclude path %q", tc.value)
 			}
-			if !strings.Contains(err.Error(), "exclude path") {
-				t.Errorf("error should name the exclude key, got: %v", err)
+			// The offending path is the stable marker; the wording is not.
+			if !strings.Contains(err.Error(), tc.value) {
+				t.Errorf("error should name the offending path %q, got: %v", tc.value, err)
 			}
 		})
+	}
+
+	// A positive magic pathspec in [exclude] is supported and must not be
+	// mistaken for the negative forms.
+	magic := writeConfig(t, "[include]\npaths = [\"src/\"]\n[exclude]\npaths = [\":(glob)src/*.gen\"]\n")
+	if _, err := Resolve(magic, nil, "/tmp/repo"); err != nil {
+		t.Fatalf("Resolve() error for a positive magic exclude path: %v", err)
 	}
 
 	// Negative [include] pathspecs are supported: they mean "everything except".
