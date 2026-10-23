@@ -345,7 +345,7 @@ func stagedSpecs(cfg *config.Config) []string {
 func translateExcludePaths(paths []string) []string {
 	specs := make([]string, len(paths))
 	for i, p := range paths {
-		if strings.HasPrefix(p, ":(") {
+		if _, _, longForm := config.SpecMagic(p); longForm {
 			specs[i] = ":(" + "exclude," + p[2:]
 		} else {
 			specs[i] = ":(exclude)" + p

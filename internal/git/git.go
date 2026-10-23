@@ -61,6 +61,16 @@ func Add(repoPath string, args ...string) error {
 	return cmd.Run()
 }
 
+// StagedPath reports whether path is in the index, which is how an index-only
+// entry is told apart from one that also has a working-tree file.
+func StagedPath(repoPath, path string) (bool, error) {
+	out, err := exec.Command("git", "-C", repoPath, "ls-files", "-z", "--", path).Output()
+	if err != nil {
+		return false, err
+	}
+	return len(bytes.TrimRight(out, "\x00")) > 0, nil
+}
+
 // Unstage removes the given pathspecs from the index, leaving the working tree
 // alone. It unstages exactly what the pathspecs match, so the caller decides the
 // scope. A whole-tree spec unstages everything the spec covers, including work
@@ -101,9 +111,12 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 }
 
 // StagedOutsideScope reports whether the index holds staged changes that the
-// write scope does not cover. scopeSpecs is the composition git-tend stages with,
-// so git evaluates includes, excludes and the sentinel alike. The answer cannot
-// drift from what the staging does. Nothing staged means nothing to protect.
+// given scope does not cover. The caller passes the declared scope, the
+// composition of [include], [exclude] and the sentinel. That is a superset of the
+// pathspecs the tick actually stages with, because git refuses some of them.
+// Using the declared scope is deliberate: work staged under a refused pathspec is
+// still someone else's, not this commit's. Nothing staged means nothing to
+// protect.
 func StagedOutsideScope(repoPath string, scopeSpecs []string) (bool, error) {
 	staged, err := stagedNames(repoPath, nil)
 	if err != nil || len(staged) == 0 {

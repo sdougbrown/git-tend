@@ -526,20 +526,32 @@ func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
 	return false
 }
 
+// SpecMagic splits a long-form pathspec magic prefix, ":(a,b,glob)rest", into its
+// magic words and the remaining pattern. ok is false when p has no long-form
+// prefix. It is the one place that parses this syntax: the config validation and
+// the staging translation both classify through it.
+func SpecMagic(p string) (words []string, rest string, ok bool) {
+	if !strings.HasPrefix(p, ":(") {
+		return nil, p, false
+	}
+	end := strings.Index(p, ")")
+	if end < 0 {
+		return nil, p, false
+	}
+	return strings.Split(p[2:end], ","), p[end+1:], true
+}
+
 // isNegativePathspec reports whether p leaves paths out, in either magic form:
 // the short :! and :^ forms, or :(...) listing exclude or negative.
 func isNegativePathspec(p string) bool {
 	if strings.HasPrefix(p, ":!") || strings.HasPrefix(p, ":^") {
 		return true
 	}
-	if !strings.HasPrefix(p, ":(") {
+	words, _, ok := SpecMagic(p)
+	if !ok {
 		return false
 	}
-	end := strings.Index(p, ")")
-	if end < 0 {
-		return false
-	}
-	for _, m := range strings.Split(p[2:end], ",") {
+	for _, m := range words {
 		if m == "exclude" || m == "negative" {
 			return true
 		}
