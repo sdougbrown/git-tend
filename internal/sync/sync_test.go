@@ -1870,6 +1870,11 @@ func TestSyncMalformedIncludeSticks(t *testing.T) {
 	if !strings.Contains(result.Error, "outside the write scope") {
 		t.Errorf("Error = %q, want it to name the scope probe", result.Error)
 	}
+	// A probe failure is a stuck episode, not a quiet skip. The agent gets the same
+	// chance it had when this input failed at the `git add`.
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Errorf("stuck flag should be written for a probe failure: %v", err)
+	}
 
 	clone2 := gitClone(t, remote)
 	defer os.RemoveAll(clone2)

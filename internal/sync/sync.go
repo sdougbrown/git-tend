@@ -204,7 +204,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// staging and the unstage, so they cannot drift apart.
 	scope := stagedSpecs(cfg)
 	if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error()), "checking for staged paths outside the write scope")
 	} else if outside {
 		return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
 	}
@@ -283,7 +283,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		// Re-check immediately before committing: the commit takes the whole
 		// index, so one staged out-of-scope path can end up in it.
 		if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
-			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
+			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error()), "checking for staged paths outside the write scope")
 		} else if outside {
 			// This tick already staged its own scope, and a skip must not leave
 			// that behind: the human's commit would sweep it in under their
