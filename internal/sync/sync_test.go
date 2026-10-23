@@ -2170,3 +2170,52 @@ func TestStagedPathsPropagatesProbeError(t *testing.T) {
 		t.Error("stagedPaths() = nil error outside a git repo, want an error")
 	}
 }
+
+// Whole-repo staging has no include pathspec, only `.`, and still has to record
+// deletions: the tick stages with `git add -- .`, which records them since git
+// 2.0.
+func TestSyncCommitsDeletionWithoutInclude(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "0s", nil, nil)
+	if err := os.WriteFile(filepath.Join(repo, "gone.txt"), []byte("gone"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", ".gittend", "gone.txt")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.Remove(filepath.Join(repo, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "gone.txt")); err == nil {
+		t.Error("the deletion should be committed in whole-repo mode")
+	}
+}
