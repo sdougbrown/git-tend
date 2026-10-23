@@ -216,7 +216,10 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// whole `git add` and would stick the repo on every tick.
 	stagePaths, err := stagedPaths(repoPath, cfg)
 	if err != nil {
-		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git ls-files", exitCodeFromErr(err), err.Error()), "resolving the write scope")
+		// The probe may have failed in `git add --dry-run` or in the `ls-files`
+		// classification, so the record names git rather than either command. The
+		// recorded output carries the failing command when it is known.
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git", exitCodeFromErr(err), err.Error()), "resolving the write scope")
 	}
 	if len(stagePaths) > 0 {
 		// The `--` separator is load-bearing: an include entry that looks like an
