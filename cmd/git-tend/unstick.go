@@ -81,6 +81,12 @@ func removeStuckFlag(repoPath string) error {
 	defer lock.Close()
 
 	stuckPath := filepath.Join(repoPath, ".gittend.stuck")
+	// An index-only sentinel outlives the file, for example after a `git add -A`
+	// during the episode. The write-scope guard excludes the sentinel from the
+	// scope it owns, so a staged one would skip every tick with no way back.
+	if err := git.Unstage(repoPath, ".gittend.stuck"); err != nil {
+		return fmt.Errorf("unstaging stuck flag: %w", err)
+	}
 	err = os.Remove(stuckPath)
 	if err != nil {
 		if os.IsNotExist(err) {

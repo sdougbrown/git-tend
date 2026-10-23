@@ -126,3 +126,39 @@ func testGitOK(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
+
+// An index-only sentinel outlives the working-tree file, for example after a
+// `git add -A` during the episode. The scope guard excludes the sentinel from the
+// paths it owns, so leaving it staged would skip every tick with no way back.
+func TestUnstickClearsStagedStuckFlag(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	repo := t.TempDir()
+	testGitOK(t, repo, "init")
+	testGitOK(t, repo, "config", "user.email", "test@gittend.local")
+	testGitOK(t, repo, "config", "user.name", "git-tend test")
+	testGitOK(t, repo, "commit", "--allow-empty", "-m", "init")
+
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), []byte("stuck_at = \"now\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", ".gittend.stuck")
+	// The daemon or the operator clears the file first; the index entry stays.
+	if err := os.Remove(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeStuckFlag(repo); err != nil {
+		t.Fatalf("removeStuckFlag() error: %v", err)
+	}
+
+	out, err := exec.Command("git", "-C", repo, "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	staged := strings.TrimSpace(string(out))
+	if strings.Contains(staged, ".gittend.stuck") {
+		t.Errorf("staged = %q, the sentinel must be unstaged", staged)
+	}
+}

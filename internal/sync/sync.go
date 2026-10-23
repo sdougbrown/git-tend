@@ -340,7 +340,7 @@ func stagedSpecs(cfg *config.Config) []string {
 // translateExcludePaths turns [exclude] entries into pathspecs that subtract
 // paths. An already-magic entry keeps its magic, prefixed with exclude. A
 // negative entry has no meaning here, because the list is already subtracted.
-// config.NegativePathspec rejects those at parse time. One that arrives from a
+// The config parser rejects those at parse time. One that arrives from a
 // hand-built config becomes a spec matching nothing, not a wildcard.
 func translateExcludePaths(paths []string) []string {
 	specs := make([]string, len(paths))
