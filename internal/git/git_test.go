@@ -648,7 +648,11 @@ func TestMatchingSpecs(t *testing.T) {
 		}
 		run(t, repo, "add", "-A")
 		run(t, repo, "commit", "-q", "-m", "init")
-		run(t, repo, "sparse-checkout", "set", "kept")
+		// Older gits spell sparse-checkout differently, so skip rather than fail
+		// where the setup itself is unavailable.
+		if err := exec.Command("git", "-C", repo, "sparse-checkout", "set", "kept").Run(); err != nil {
+			t.Skipf("sparse-checkout unavailable: %v", err)
+		}
 
 		// `git add` refuses a path outside the sparse cone even though the index
 		// still lists it; predicting that from the index would keep the spec and
