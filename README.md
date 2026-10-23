@@ -24,7 +24,7 @@ The daemon also tracks an "offline" state separately from "stuck." If a fetch or
 
 ## Install
 
-**Prerequisites:** macOS or Linux. The binary is statically compiled — no runtime dependencies.
+**Prerequisites:** macOS or Linux, and **git 2.13 or newer** on `PATH`. The binary is statically compiled apart from that. 2.13 is where `git rev-parse --absolute-git-dir`, which the daemon uses to find the repository, arrives; deletions have been staged by a pathspec `git add` since 2.0.
 
 Download a release binary from the [releases page](https://github.com/sdougbrown/git-tend/releases/latest) and put it on your `PATH`. Replace `<os>` with `darwin` or `linux` and `<arch>` with `arm64` or `amd64`:
 
