@@ -526,7 +526,6 @@ func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
 	return false
 }
 
-// finalizeConfig applies built-in defaults and validation to a config.
 // isNegativePathspec reports whether p leaves paths out, in either magic form:
 // the short :! and :^ forms, or :(...) listing exclude or negative.
 func isNegativePathspec(p string) bool {
@@ -548,6 +547,7 @@ func isNegativePathspec(p string) bool {
 	return false
 }
 
+// finalizeConfig applies built-in defaults and validation to a config.
 func finalizeConfig(cfg *Config) error {
 	if cfg.Mode == "" {
 		cfg.Mode = "read-only"
