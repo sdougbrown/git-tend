@@ -541,9 +541,9 @@ func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
 	}
 }
 
-// A positive pathspec that matches no paths makes `git add` fail outright. A
-// folder scope naming a directory that does not exist yet would then stick the
-// repo on every tick. Callers filter the scope through this first.
+// `git add` exits 128 on a positive pathspec that names no existing path. A
+// folder scope naming a directory that does not exist yet would therefore stick
+// the repo on every tick. Callers filter the scope through this first.
 func TestMatchingSpecs(t *testing.T) {
 	repo := initRepo(t)
 	for _, d := range []string{"src", "projects/alpha"} {
@@ -597,9 +597,9 @@ func TestMatchingSpecs(t *testing.T) {
 		t.Errorf("MatchingSpecs() = %v, want the spec kept for a staged deletion", got)
 	}
 
-	// A spec whose only match is ignored is dropped: `git add` refuses ignored
-	// paths, so keeping the spec would reproduce the stuck tick. The ignore
-	// rules are what makes the probe agree with `git add`.
+	// A spec whose only match is ignored is dropped. `git add` errors on a
+	// pathspec naming an ignored file, and a directory of only ignored files adds
+	// nothing either way. The ignore rules keep the two in agreement.
 	if err := os.MkdirAll(filepath.Join(repo, "scoped"), 0755); err != nil {
 		t.Fatal(err)
 	}

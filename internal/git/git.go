@@ -160,10 +160,11 @@ func stagedNames(repoPath string, specs []string) ([]string, error) {
 	return strings.Split(trimmed, "\x00"), nil
 }
 
-// MatchingSpecs returns the given pathspecs that match at least one path in the
-// repository. `git add` fails outright on a positive pathspec that matches
-// nothing. A scope naming a directory that does not exist yet therefore has to
-// be filtered out rather than passed through.
+// MatchingSpecs returns the given pathspecs that name at least one existing path.
+// `git add` exits 128 on a positive pathspec that names no existing path. A scope
+// naming a directory that does not exist yet therefore has to be filtered out
+// rather than passed through. The probe also applies `git add`'s ignore rules,
+// because `git add` errors on a pathspec that names an ignored file.
 func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
 	matched := make([]string, 0, len(specs))
 	for _, spec := range specs {

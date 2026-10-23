@@ -340,8 +340,8 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 
 // stagedPaths returns the pathspecs this tick stages: the [include] paths, or the
 // whole tree when unset, minus the [exclude] paths, and never the stuck sentinel.
-// It returns nil when a folder scope matches no paths yet, because `git add`
-// rejects a pathspec that matches nothing. An unstage after a skip uses this same
+// It returns nil when a folder scope names no existing path yet, because
+// `git add` exits 128 on such a pathspec. An unstage after a skip uses this same
 // list, so it removes exactly what the tick staged and nothing a human did.
 // stagedSpecs returns the declared write scope: the [include] paths, or the whole
 // tree when unset, never the stuck sentinel, minus the [exclude] paths.
