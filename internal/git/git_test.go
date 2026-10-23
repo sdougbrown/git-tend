@@ -601,7 +601,7 @@ func TestMatchingSpecs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MatchingSpecs() error: %v", err)
 		}
-		if len(got) != 1 {
+		if !sameSpecs(got, []string{"src/"}) {
 			t.Errorf("MatchingSpecs() = %v, want the spec kept for a staged deletion", got)
 		}
 	})

@@ -173,19 +173,19 @@ func stagedNames(repoPath string, specs []string) ([]string, error) {
 func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
 	accepted := make([]string, 0, len(specs))
 	for _, spec := range specs {
+		cmd := exec.Command("git", "-C", repoPath, "add", "--dry-run", "--", spec)
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if err := cmd.Run(); err == nil {
+			accepted = append(accepted, spec)
+			continue
+		} else if !errors.As(err, new(*exec.ExitError)) {
+			return nil, err
+		}
+		// The dry run failed: ask `ls-files` whether git can parse the spec at
+		// all. If it cannot, this is a broken configuration and not a refusal.
 		if err := usableSpec(repoPath, spec); err != nil {
 			return nil, err
 		}
-		cmd := exec.Command("git", "-C", repoPath, "add", "--dry-run", "--", spec)
-		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-		if err := cmd.Run(); err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				continue
-			}
-			return nil, err
-		}
-		accepted = append(accepted, spec)
 	}
 	return accepted, nil
 }
