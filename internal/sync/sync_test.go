@@ -2043,4 +2043,69 @@ func TestSyncIncludeMatchesNothing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err == nil {
 		t.Error("a scope that matches nothing must not write the stuck flag")
 	}
+
+	// Falling back to staging everything when the scope matches nothing would
+	// sweep the out-of-scope file in, so pin it.
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "notes.txt")); err == nil {
+		t.Error("notes.txt is out of scope and must not be committed")
+	}
+}
+
+// A scope entry that looks like a git option must reach `git add` as a path, not
+// a flag. Without the `--` separator a scoped `-A` would stage the whole tree
+// and defeat the write scope.
+func TestSyncScopeEntryLooksLikeOption(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "-A"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"-A/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "-A", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Outside the scope: staging it would prove the scope was bypassed.
+	if err := os.WriteFile(filepath.Join(repo, "outside.txt"), []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"-A/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok for an option-looking scope entry, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "-A", "keep.txt")); err != nil {
+		t.Error("-A/keep.txt should be committed")
+	}
+	if _, err := os.Stat(filepath.Join(clone2, "outside.txt")); err == nil {
+		t.Error("outside.txt is out of scope and must not be committed")
+	}
 }

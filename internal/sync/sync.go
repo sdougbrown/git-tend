@@ -217,6 +217,9 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return SyncResult{State: "stuck", Error: fmt.Sprintf("resolving the write scope: %v", err)}
 	}
 	if len(stagePaths) > 0 {
+		// The `--` separator is load-bearing: a scope entry that looks like an
+		// option must reach git as a path, or `git add -A` would stage the whole
+		// tree.
 		args := append([]string{"--"}, stagePaths...)
 		if len(cfg.Include.Paths) == 0 {
 			args = append([]string{"-A"}, args...)
