@@ -570,6 +570,26 @@ func TestMatchingSpecs(t *testing.T) {
 		t.Errorf("MatchingSpecs() = %v, want the spec kept for a staged deletion", got)
 	}
 
+	// A spec whose only match is ignored is dropped: `git add` refuses ignored
+	// paths, so keeping the spec would reproduce the stuck tick. The ignore
+	// rules are what makes the probe agree with `git add`.
+	if err := os.MkdirAll(filepath.Join(repo, "scoped"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "scoped", "trace.log"), []byte("ignored"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = MatchingSpecs(repo, []string{"scoped/"})
+	if err != nil {
+		t.Fatalf("MatchingSpecs() error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("MatchingSpecs() = %v, want the ignored-only spec dropped", got)
+	}
+
 	if _, err := MatchingSpecs(t.TempDir(), specs); err == nil {
 		t.Error("MatchingSpecs() = nil error outside a git repo, want an error")
 	}
