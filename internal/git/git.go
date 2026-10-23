@@ -61,6 +61,14 @@ func Add(repoPath string, args ...string) error {
 	return cmd.Run()
 }
 
+// Unstage removes the given pathspecs from the index, leaving the working tree
+// alone. It never resets the whole index: the caller passes exactly the paths it
+// staged, so work someone else staged stays staged.
+func Unstage(repoPath string, specs ...string) error {
+	args := append([]string{"-C", repoPath, "reset", "-q", "--"}, specs...)
+	return exec.Command("git", args...).Run()
+}
+
 func Commit(repoPath, message string, noVerify bool) error {
 	args := []string{"-C", repoPath, "commit", "-m", message}
 	if noVerify {

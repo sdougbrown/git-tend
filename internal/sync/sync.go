@@ -217,20 +217,8 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return SyncResult{State: "skipped", Error: "debounce"}
 	}
 
-	excludeSpecs := translateExcludePaths(cfg.Exclude.Paths)
-
-	if len(cfg.Include.Paths) > 0 {
-		args := append([]string{"--"}, cfg.Include.Paths...)
-		args = append(args, ":!.gittend.stuck")
-		args = append(args, excludeSpecs...)
-		if err := git.Add(repoPath, args...); err != nil {
-			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
-		}
-	} else {
-		args := append([]string{"-A", "--", ":!.gittend.stuck"}, excludeSpecs...)
-		if err := git.Add(repoPath, args...); err != nil {
-			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
-		}
+	if err := git.Add(repoPath, append([]string{"--"}, stagedSpecs(cfg)...)...); err != nil {
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
 	}
 
 	diff, err := git.DiffCachedNameStatus(repoPath)
@@ -305,6 +293,14 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		if outside, err := stagedOutsideScope(); err != nil {
 			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
 		} else if outside {
+			// This tick already staged its own scope, and a skip must not leave
+			// that behind: the human's commit would sweep it in under their
+			// message. Unstage the pathspecs this tick staged, never the whole
+			// index. In-scope work a human staged returns to the working tree,
+			// and the next tick stages it again.
+			if err := git.Unstage(repoPath, stagedSpecs(cfg)...); err != nil {
+				return SyncResult{State: "stuck", Error: fmt.Sprintf("unstaging after the write-scope re-check: %v", err)}
+			}
 			return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
 		}
 		if err := git.Commit(repoPath, msg, cfg.Commit.NoVerify); err != nil {
@@ -334,6 +330,19 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	}
 
 	return SyncResult{State: "ok"}
+}
+
+// stagedSpecs returns the pathspecs git-tend stages: the [include] paths, or the
+// whole tree when unset, minus the [exclude] paths. The stuck sentinel is never
+// staged. An unstage after a skip uses this same list, so it removes exactly
+// what the tick staged and nothing a human did.
+func stagedSpecs(cfg *config.Config) []string {
+	specs := []string{"."}
+	if len(cfg.Include.Paths) > 0 {
+		specs = append([]string{}, cfg.Include.Paths...)
+	}
+	specs = append(specs, ":!.gittend.stuck")
+	return append(specs, translateExcludePaths(cfg.Exclude.Paths)...)
 }
 
 func translateExcludePaths(paths []string) []string {

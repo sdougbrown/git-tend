@@ -1476,6 +1476,14 @@ func TestSyncRechecksStagedPathsBeforeCommit(t *testing.T) {
 		t.Fatalf("expected skipped (staging appeared mid-tick), got %s: %s", result.State, result.Error)
 	}
 
+	// The tick staged its own scope before the re-check. Leaving that behind
+	// would sweep it into the human's commit under their message, so the index
+	// goes back to holding only their staging.
+	staged := strings.TrimSpace(testGit(t, repo, "diff", "--cached", "--name-only"))
+	if staged != "outside/notes.txt" {
+		t.Errorf("staged = %q, want only the human's staging", staged)
+	}
+
 	clone2 := gitClone(t, remote)
 	defer os.RemoveAll(clone2)
 	for _, p := range []string{"outside/notes.txt", "src/keep.txt"} {
