@@ -1946,3 +1946,101 @@ func TestSyncUnstageFailureSticks(t *testing.T) {
 		t.Errorf("stuck flag should be written when the unstage fails: %v", err)
 	}
 }
+
+// A scope glob with no matches yet must not stick the repo. `git add` exits 128
+// on a pathspec that names no existing path, and a fresh clone has no
+// projects/*/memory directory until someone creates one.
+func TestSyncIncludeGlobWithNoMatches(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	include := []string{"src/", ":(glob)projects/*/memory/*"}
+	writeTestConfig(t, repo, "read-write", "main", "0s", include, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: include},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok with an unmatched glob in the scope, got %s: %s", result.State, result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err == nil {
+		t.Error("an unmatched scope glob must not write the stuck flag")
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "keep.txt")); err != nil {
+		t.Error("src/keep.txt should be committed while the glob matches nothing")
+	}
+}
+
+// A scope that matches nothing at all leaves the tick with nothing to stage, and
+// it still syncs.
+func TestSyncIncludeMatchesNothing(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"future/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Dirty, but outside the scope.
+	if err := os.WriteFile(filepath.Join(repo, "notes.txt"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"future/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok when the scope matches nothing, got %s: %s", result.State, result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err == nil {
+		t.Error("a scope that matches nothing must not write the stuck flag")
+	}
+}

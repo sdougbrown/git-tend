@@ -200,8 +200,9 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// the whole index. Staged work outside that scope belongs to a commit someone
 	// else is preparing, so leave the repo alone for this tick. Resume once the
 	// index clears. Staged work inside the scope is indistinguishable from
-	// git-tend's own, and is fair game. One composed list drives the guard, the
-	// staging and the unstage, so they cannot drift apart.
+	// git-tend's own, and is fair game. The guard reads the declared scope, not
+	// the filtered one: a scope that matches nothing yet still owns nothing, so
+	// anything staged is someone else's.
 	scope := stagedSpecs(cfg)
 	if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
 		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error()), "checking for staged paths outside the write scope")
@@ -209,8 +210,20 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
 	}
 
-	if err := git.Add(repoPath, append([]string{"--"}, scope...)...); err != nil {
-		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
+	// Only the scope pathspecs git accepts are staged: one it refuses fails the
+	// whole `git add` and would stick the repo on every tick.
+	stagePaths, err := stagedPaths(repoPath, cfg)
+	if err != nil {
+		return SyncResult{State: "stuck", Error: fmt.Sprintf("resolving the write scope: %v", err)}
+	}
+	if len(stagePaths) > 0 {
+		args := append([]string{"--"}, stagePaths...)
+		if len(cfg.Include.Paths) == 0 {
+			args = append([]string{"-A"}, args...)
+		}
+		if err := git.Add(repoPath, args...); err != nil {
+			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
+		}
 	}
 
 	diff, err := git.DiffCachedNameStatus(repoPath)
@@ -290,8 +303,10 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 			// message. Unstage the pathspecs this tick staged, never the whole
 			// index. In-scope work a human staged returns to the working tree,
 			// and the next tick stages it again.
-			if err := git.Unstage(repoPath, scope...); err != nil {
-				return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git reset", exitCodeFromErr(err), err.Error()), "unstaging after the write-scope re-check")
+			if len(stagePaths) > 0 {
+				if err := git.Unstage(repoPath, stagePaths...); err != nil {
+					return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git reset", exitCodeFromErr(err), err.Error()), "unstaging after the write-scope re-check")
+				}
 			}
 			return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
 		}
@@ -324,14 +339,41 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	return SyncResult{State: "ok"}
 }
 
-// stagedSpecs returns the pathspecs git-tend stages: the [include] paths, or the
-// whole tree when unset, minus the [exclude] paths. The stuck sentinel is never
-// staged. An unstage after a skip uses this same list, so it removes exactly
-// what the tick staged and nothing a human did.
+// stagedPaths returns the pathspecs this tick stages: the [include] paths, or the
+// whole tree when unset, minus the [exclude] paths, and never the stuck sentinel.
+// It returns nil when a folder scope matches no paths yet, because `git add`
+// rejects a pathspec that matches nothing. An unstage after a skip uses this same
+// list, so it removes exactly what the tick staged and nothing a human did.
+// stagedSpecs returns the declared write scope: the [include] paths, or the whole
+// tree when unset, never the stuck sentinel, minus the [exclude] paths.
 func stagedSpecs(cfg *config.Config) []string {
-	specs := []string{"."}
-	if len(cfg.Include.Paths) > 0 {
-		specs = append([]string{}, cfg.Include.Paths...)
+	return scopeSpecs(cfg.Include.Paths, cfg)
+}
+
+// stagedPaths returns the scope narrowed to the pathspecs `git add` accepts, or
+// nil when git would refuse every one of them. An unstage after a skip uses the
+// same list, so it removes exactly what the tick staged.
+func stagedPaths(repoPath string, cfg *config.Config) ([]string, error) {
+	if len(cfg.Include.Paths) == 0 {
+		return stagedSpecs(cfg), nil
+	}
+	matched, err := git.MatchingSpecs(repoPath, cfg.Include.Paths)
+	if err != nil {
+		return nil, err
+	}
+	if len(matched) == 0 {
+		return nil, nil
+	}
+	return scopeSpecs(matched, cfg), nil
+}
+
+// scopeSpecs composes pathspecs from a positive part: the given paths, or the
+// whole tree when there are none, then the sentinel and the translated excludes.
+func scopeSpecs(positives []string, cfg *config.Config) []string {
+	specs := make([]string, 0, len(positives)+1+len(cfg.Exclude.Paths))
+	specs = append(specs, positives...)
+	if len(specs) == 0 {
+		specs = append(specs, ".")
 	}
 	specs = append(specs, ":!.gittend.stuck")
 	return append(specs, translateExcludePaths(cfg.Exclude.Paths)...)

@@ -513,3 +513,64 @@ func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
 		t.Error("StagedOutsideScope() = nil error outside a git repo, want an error")
 	}
 }
+
+// A positive pathspec that matches no paths makes `git add` fail outright, so a
+// folder scope pointing at a directory that does not exist yet sticks the repo
+// on every tick. Callers filter the scope through this first.
+func TestMatchingSpecs(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	for _, d := range []string{"src", "projects/alpha"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"src/a.txt", "projects/alpha/note.md"} {
+		if err := os.WriteFile(filepath.Join(repo, f), []byte(f), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	specs := []string{"src/", ":(glob)projects/*/memory/*", "missing/"}
+	got, err := MatchingSpecs(repo, specs)
+	if err != nil {
+		t.Fatalf("MatchingSpecs() error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "src/" {
+		t.Errorf("MatchingSpecs() = %v, want [src/] (glob matches no memory dir yet, missing/ does not exist)", got)
+	}
+
+	// Once the glob's directory exists it is kept.
+	if err := os.MkdirAll(filepath.Join(repo, "projects/alpha/memory"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "projects/alpha/memory/note.md"), []byte("n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = MatchingSpecs(repo, specs)
+	if err != nil {
+		t.Fatalf("MatchingSpecs() error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "src/" || got[1] != ":(glob)projects/*/memory/*" {
+		t.Errorf("MatchingSpecs() = %v, want both matching specs in order", got)
+	}
+
+	// A tracked file deleted from the worktree still counts: `git add` stages
+	// the deletion.
+	run(t, repo, "add", "src/a.txt")
+	run(t, repo, "commit", "-q", "-m", "track src/a.txt")
+	if err := os.Remove(filepath.Join(repo, "src", "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = MatchingSpecs(repo, []string{"src/"})
+	if err != nil {
+		t.Fatalf("MatchingSpecs() error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("MatchingSpecs() = %v, want the spec kept for a staged deletion", got)
+	}
+
+	if _, err := MatchingSpecs(t.TempDir(), specs); err == nil {
+		t.Error("MatchingSpecs() = nil error outside a git repo, want an error")
+	}
+}
