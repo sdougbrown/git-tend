@@ -173,26 +173,6 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		}
 	}
 
-	// In folder-scoped write mode git-tend adds only the [include] paths minus
-	// the [exclude] paths, but commits the whole index. Staged work outside that
-	// combination belongs to a commit someone else is preparing. Leave the repo
-	// alone for this tick, and resume once the index clears. Staged work inside
-	// the scope is indistinguishable from git-tend's own, and is fair game. An
-	// [exclude] with no [include] still narrows the staging, so it is checked on
-	// its own.
-	stagedOutsideScope := func() (bool, error) {
-		if len(cfg.Include.Paths) == 0 && len(cfg.Exclude.Paths) == 0 {
-			return false, nil
-		}
-		return git.StagedOutsideScope(repoPath, cfg.Include.Paths, cfg.Exclude.Paths)
-	}
-
-	if outside, err := stagedOutsideScope(); err != nil {
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
-	} else if outside {
-		return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
-	}
-
 	files, err := git.ListTrackedFiles(repoPath)
 	if err != nil {
 		return SyncResult{State: "stuck", Error: fmt.Sprintf("listing tracked files: %v", err)}
@@ -216,7 +196,20 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return SyncResult{State: "skipped", Error: "debounce"}
 	}
 
-	if err := git.Add(repoPath, append([]string{"--"}, stagedSpecs(cfg)...)...); err != nil {
+	// In folder-scoped write mode git-tend stages one composed scope but commits
+	// the whole index. Staged work outside that scope belongs to a commit someone
+	// else is preparing, so leave the repo alone for this tick. Resume once the
+	// index clears. Staged work inside the scope is indistinguishable from
+	// git-tend's own, and is fair game. One composed list drives the guard, the
+	// staging and the unstage, so they cannot drift apart.
+	scope := stagedSpecs(cfg)
+	if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
+		return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
+	} else if outside {
+		return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
+	}
+
+	if err := git.Add(repoPath, append([]string{"--"}, scope...)...); err != nil {
 		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
 	}
 
@@ -289,7 +282,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		// staging that happens during it is invisible to the tick-start check.
 		// Re-check immediately before committing: the commit takes the whole
 		// index, so one staged out-of-scope path can end up in it.
-		if outside, err := stagedOutsideScope(); err != nil {
+		if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
 			return SyncResult{State: "stuck", Error: fmt.Sprintf("checking for staged paths outside the write scope: %v", err)}
 		} else if outside {
 			// This tick already staged its own scope, and a skip must not leave
@@ -297,7 +290,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 			// message. Unstage the pathspecs this tick staged, never the whole
 			// index. In-scope work a human staged returns to the working tree,
 			// and the next tick stages it again.
-			if err := git.Unstage(repoPath, stagedSpecs(cfg)...); err != nil {
+			if err := git.Unstage(repoPath, scope...); err != nil {
 				return SyncResult{State: "stuck", Error: fmt.Sprintf("unstaging after the write-scope re-check: %v", err)}
 			}
 			return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}

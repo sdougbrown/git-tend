@@ -310,12 +310,12 @@ func TestStagedOutsideScope(t *testing.T) {
 		}
 	}
 
-	// The write scope is memory/ plus a magic-prefixed glob, minus src/secrets/.
+	// The write scope is memory/ plus a magic-prefixed glob, minus src/secrets/,
+	// composed exactly as the staging composes it.
 	outside := func() bool {
 		t.Helper()
 		got, err := StagedOutsideScope(repo,
-			[]string{"memory/", ":(glob)projects/*/memory/*"},
-			[]string{"src/secrets/"})
+			[]string{"memory/", ":(glob)projects/*/memory/*", ":!.gittend.stuck", ":(exclude)src/secrets/"})
 		if err != nil {
 			t.Fatalf("StagedOutsideScope() error: %v", err)
 		}
@@ -383,7 +383,7 @@ func TestStagedOutsideScopeWithoutInclude(t *testing.T) {
 
 	outside := func() bool {
 		t.Helper()
-		got, err := StagedOutsideScope(repo, nil, []string{"secrets/"})
+		got, err := StagedOutsideScope(repo, []string{".", ":(exclude)secrets/"})
 		if err != nil {
 			t.Fatalf("StagedOutsideScope() error: %v", err)
 		}
@@ -418,7 +418,7 @@ func TestStagedOutsideScopeNegativeInclude(t *testing.T) {
 	}
 	outside := func() bool {
 		t.Helper()
-		got, err := StagedOutsideScope(repo, []string{":!docs/", ":(exclude,glob)tmp/*"}, nil)
+		got, err := StagedOutsideScope(repo, []string{":!docs/", ":(exclude,glob)tmp/*"})
 		if err != nil {
 			t.Fatalf("StagedOutsideScope() error: %v", err)
 		}
@@ -447,7 +447,7 @@ func TestStagedOutsideScopeNegativeInclude(t *testing.T) {
 }
 
 func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
-	if _, err := StagedOutsideScope(t.TempDir(), []string{"src/"}, nil); err == nil {
+	if _, err := StagedOutsideScope(t.TempDir(), []string{"src/"}); err == nil {
 		t.Error("StagedOutsideScope() = nil error outside a git repo, want an error")
 	}
 }

@@ -100,51 +100,27 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 	return string(out), err
 }
 
-// StagedOutsideScope reports whether the index holds staged changes that
-// git-tend's own staging does not cover. Those are paths outside the write scope
-// as git evaluates [include], plus paths the scope deliberately leaves out
-// ([exclude]). An empty scope means no include restriction, so everything is
-// inside it. Nothing staged means nothing to protect.
-func StagedOutsideScope(repoPath string, includeSpecs, excludeSpecs []string) (bool, error) {
+// StagedOutsideScope reports whether the index holds staged changes that the
+// write scope does not cover. scopeSpecs is the composition git-tend stages with,
+// so git evaluates includes, excludes and the sentinel alike. The answer cannot
+// drift from what the staging does. Nothing staged means nothing to protect.
+func StagedOutsideScope(repoPath string, scopeSpecs []string) (bool, error) {
 	staged, err := stagedNames(repoPath, nil)
+	if err != nil || len(staged) == 0 {
+		return false, err
+	}
+
+	names, err := stagedNames(repoPath, scopeSpecs)
 	if err != nil {
 		return false, err
 	}
-	if len(staged) == 0 {
-		return false, nil
-	}
-
-	inScope := make(map[string]struct{}, len(staged))
-	if len(includeSpecs) == 0 {
-		for _, p := range staged {
-			inScope[p] = struct{}{}
-		}
-	} else {
-		names, err := stagedNames(repoPath, includeSpecs)
-		if err != nil {
-			return false, err
-		}
-		for _, p := range names {
-			inScope[p] = struct{}{}
-		}
-	}
-
-	excluded := make(map[string]struct{})
-	if len(excludeSpecs) > 0 {
-		names, err := stagedNames(repoPath, excludeSpecs)
-		if err != nil {
-			return false, err
-		}
-		for _, p := range names {
-			excluded[p] = struct{}{}
-		}
+	inScope := make(map[string]struct{}, len(names))
+	for _, p := range names {
+		inScope[p] = struct{}{}
 	}
 
 	for _, p := range staged {
 		if _, ok := inScope[p]; !ok {
-			return true, nil
-		}
-		if _, ok := excluded[p]; ok {
 			return true, nil
 		}
 	}
