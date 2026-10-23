@@ -1820,3 +1820,60 @@ func TestSyncMagicExcludeScope(t *testing.T) {
 		t.Error("a hand-staged magic-excluded path must not be committed")
 	}
 }
+
+// A malformed include pathspec is reachable input: `finalizeConfig` validates
+// exclude paths, not include ones. The tick must report stuck rather than carry
+// on with an empty staging set, which would stop the scope committing silently.
+func TestSyncMalformedIncludeSticks(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	bad := []string{":(typo)src/"}
+	writeTestConfig(t, repo, "read-write", "main", "0s", bad, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Stage it so the guard parses the scope: with an empty index the guard
+	// short-circuits and a malformed spec only surfaces at the `git add`.
+	testGitOK(t, repo, "add", "src/keep.txt")
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: bad},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "stuck" {
+		t.Fatalf("expected stuck for an unparseable include pathspec, got %s: %s", result.State, result.Error)
+	}
+	if !strings.Contains(result.Error, "outside the write scope") {
+		t.Errorf("Error = %q, want it to name the scope probe", result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "keep.txt")); err == nil {
+		t.Error("nothing should be committed when the scope cannot be read")
+	}
+}
