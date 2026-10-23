@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+// initRepo creates a temporary repository with a local identity, so tests that
+// commit do not depend on the machine (or CI runner) having one.
+func initRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	run(t, repo, "config", "user.name", "git-tend test")
+	run(t, repo, "config", "user.email", "test@gittend.local")
+	return repo
+}
+
 func TestCommitEditRecent(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "init", "-q")
@@ -294,11 +305,7 @@ func TestIsNetworkError(t *testing.T) {
 }
 
 func TestStagedOutsideScope(t *testing.T) {
-	repo := t.TempDir()
-	run(t, repo, "init", "-q")
-	// CI runners ship without a default identity, so the commit below needs one.
-	run(t, repo, "config", "user.name", "git-tend test")
-	run(t, repo, "config", "user.email", "test@gittend.local")
+	repo := initRepo(t)
 	for _, d := range []string{"memory", "notes", "src/secrets", "projects/x/memory"} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
 			t.Fatal(err)
@@ -368,8 +375,7 @@ func TestStagedOutsideScope(t *testing.T) {
 // empty inversion therefore has to mean "everything is inside the scope", not
 // "nothing is".
 func TestStagedOutsideScopeWithoutInclude(t *testing.T) {
-	repo := t.TempDir()
-	run(t, repo, "init", "-q")
+	repo := initRepo(t)
 	for _, d := range []string{"src", "secrets"} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
 			t.Fatal(err)
@@ -518,8 +524,7 @@ func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
 // folder scope pointing at a directory that does not exist yet sticks the repo
 // on every tick. Callers filter the scope through this first.
 func TestMatchingSpecs(t *testing.T) {
-	repo := t.TempDir()
-	run(t, repo, "init", "-q")
+	repo := initRepo(t)
 	for _, d := range []string{"src", "projects/alpha"} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
 			t.Fatal(err)
