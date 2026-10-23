@@ -162,8 +162,8 @@ func stagedNames(repoPath string, specs []string) ([]string, error) {
 
 // MatchingSpecs returns the given pathspecs that match at least one path in the
 // repository. `git add` fails outright on a positive pathspec that matches
-// nothing, so a scope naming a directory that does not exist yet has to be
-// filtered out rather than passed through.
+// nothing. A scope naming a directory that does not exist yet therefore has to
+// be filtered out rather than passed through.
 func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
 	matched := make([]string, 0, len(specs))
 	for _, spec := range specs {

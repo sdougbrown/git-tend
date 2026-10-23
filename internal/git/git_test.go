@@ -520,9 +520,9 @@ func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
 	}
 }
 
-// A positive pathspec that matches no paths makes `git add` fail outright, so a
-// folder scope pointing at a directory that does not exist yet sticks the repo
-// on every tick. Callers filter the scope through this first.
+// A positive pathspec that matches no paths makes `git add` fail outright. A
+// folder scope naming a directory that does not exist yet would then stick the
+// repo on every tick. Callers filter the scope through this first.
 func TestMatchingSpecs(t *testing.T) {
 	repo := initRepo(t)
 	for _, d := range []string{"src", "projects/alpha"} {
