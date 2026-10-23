@@ -665,3 +665,45 @@ on_stuck_cmd = "true"
 		t.Errorf("MaxAttempts = %d, want 4 (earlier entry kept)", resolved.Agent.MaxAttempts)
 	}
 }
+
+func TestResolveRejectsNegativeExcludePathspecs(t *testing.T) {
+	// [exclude] is already subtracted from the staging and probed directly by
+	// the auto-commit guard. A negative entry there matches nothing and would
+	// read every staged path as excluded. [include] accepts negatives.
+	for _, tc := range []struct{ name, value string }{
+		{"short bang", ":!docs/"},
+		{"short caret", ":^docs/"},
+		{"long form", ":(exclude)docs/"},
+		{"long form with glob", ":(exclude,glob)docs/*"},
+		{"negative word", ":(negative)docs/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gittend := writeConfig(t, "[exclude]\npaths = [\""+tc.value+"\"]\n")
+			_, err := Resolve(gittend, nil, "/tmp/repo")
+			if err == nil {
+				t.Fatalf("expected an error for the negative exclude path %q", tc.value)
+			}
+			// The offending path is the stable marker; the wording is not.
+			if !strings.Contains(err.Error(), tc.value) {
+				t.Errorf("error should name the offending path %q, got: %v", tc.value, err)
+			}
+		})
+	}
+
+	// A positive magic pathspec in [exclude] is supported and must not be
+	// mistaken for the negative forms.
+	magic := writeConfig(t, "[include]\npaths = [\"src/\"]\n[exclude]\npaths = [\":(glob)src/*.gen\"]\n")
+	if _, err := Resolve(magic, nil, "/tmp/repo"); err != nil {
+		t.Fatalf("Resolve() error for a positive magic exclude path: %v", err)
+	}
+
+	// Negative [include] pathspecs are supported: they mean "everything except".
+	gittend := writeConfig(t, "[include]\npaths = [\":!docs/\", \":(exclude,glob)tmp/*\"]\n[exclude]\npaths = [\"secrets/\"]\n")
+	cfg, err := Resolve(gittend, nil, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if len(cfg.Include.Paths) != 2 || cfg.Include.Paths[0] != ":!docs/" {
+		t.Errorf("Include.Paths = %v, want both negative specs kept", cfg.Include.Paths)
+	}
+}

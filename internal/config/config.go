@@ -526,6 +526,39 @@ func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
 	return false
 }
 
+// SpecMagic splits a long-form pathspec magic prefix, ":(a,b,glob)rest", into its
+// magic words and the remaining pattern. ok is false when p has no long-form
+// prefix. It is the one place that parses this syntax: the config validation and
+// the staging translation both classify through it.
+func SpecMagic(p string) (words []string, rest string, ok bool) {
+	if !strings.HasPrefix(p, ":(") {
+		return nil, p, false
+	}
+	end := strings.Index(p, ")")
+	if end < 0 {
+		return nil, p, false
+	}
+	return strings.Split(p[2:end], ","), p[end+1:], true
+}
+
+// isNegativePathspec reports whether p leaves paths out, in either magic form:
+// the short :! and :^ forms, or :(...) listing exclude or negative.
+func isNegativePathspec(p string) bool {
+	if strings.HasPrefix(p, ":!") || strings.HasPrefix(p, ":^") {
+		return true
+	}
+	words, _, ok := SpecMagic(p)
+	if !ok {
+		return false
+	}
+	for _, m := range words {
+		if m == "exclude" || m == "negative" {
+			return true
+		}
+	}
+	return false
+}
+
 // finalizeConfig applies built-in defaults and validation to a config.
 func finalizeConfig(cfg *Config) error {
 	if cfg.Mode == "" {
@@ -561,6 +594,16 @@ func finalizeConfig(cfg *Config) error {
 		cfg.Commit.Emoji = "🐌"
 	}
 
+	// A negative pathspec in [exclude] is contradictory. That list is already
+	// subtracted from the staging, and the auto-commit guard probes it directly.
+	// So `:!docs/` matches nothing there, and every staged path would read as
+	// excluded. [include] accepts negatives, because git evaluates them for the
+	// staging and for the guard alike.
+	for _, p := range cfg.Exclude.Paths {
+		if isNegativePathspec(p) {
+			return fmt.Errorf("invalid exclude path %q: negative pathspecs are contradictory there, [exclude] already subtracts paths", p)
+		}
+	}
 	if cfg.Commit.Strategy == "" {
 		cfg.Commit.Strategy = "deterministic"
 	}

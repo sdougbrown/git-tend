@@ -48,9 +48,13 @@ func unstickAllRepos() error {
 
 	anyStuck := false
 	for repoPath := range sf.Repos {
+		// A sentinel can outlive its file by staying in the index, so the file is
+		// not the only evidence that a repo needs unsticking.
 		stuckPath := filepath.Join(repoPath, ".gittend.stuck")
 		if _, err := os.Stat(stuckPath); os.IsNotExist(err) {
-			continue
+			if staged, err := git.StagedPath(repoPath, ".gittend.stuck"); err != nil || !staged {
+				continue
+			}
 		}
 		anyStuck = true
 		if err := removeStuckFlag(repoPath); err != nil {
@@ -81,10 +85,24 @@ func removeStuckFlag(repoPath string) error {
 	defer lock.Close()
 
 	stuckPath := filepath.Join(repoPath, ".gittend.stuck")
+	// An index-only sentinel outlives the file, for example after a `git add -A`
+	// during the episode. The write-scope guard excludes the sentinel from the
+	// scope it owns, so a staged one would skip every tick with no way back.
+	staged, err := git.StagedPath(repoPath, ".gittend.stuck")
+	if err != nil {
+		return fmt.Errorf("checking staged stuck flag: %w", err)
+	}
+	if err := git.Unstage(repoPath, ".gittend.stuck"); err != nil {
+		return fmt.Errorf("unstaging stuck flag: %w", err)
+	}
 	err = os.Remove(stuckPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("no stuck flag at %s\n", stuckPath)
+			if staged {
+				fmt.Printf("cleared staged stuck flag for %s\n", repoPath)
+			} else {
+				fmt.Printf("no stuck flag at %s\n", stuckPath)
+			}
 			return nil
 		}
 		return fmt.Errorf("removing stuck flag: %w", err)

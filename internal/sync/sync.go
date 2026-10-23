@@ -196,20 +196,21 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		return SyncResult{State: "skipped", Error: "debounce"}
 	}
 
-	excludeSpecs := translateExcludePaths(cfg.Exclude.Paths)
+	// In folder-scoped write mode git-tend stages one composed scope but commits
+	// the whole index. Staged work outside that scope belongs to a commit someone
+	// else is preparing, so leave the repo alone for this tick. Resume once the
+	// index clears. Staged work inside the scope is indistinguishable from
+	// git-tend's own, and is fair game. One composed list drives the guard, the
+	// staging and the unstage, so they cannot drift apart.
+	scope := stagedSpecs(cfg)
+	if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error()), "checking for staged paths outside the write scope")
+	} else if outside {
+		return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
+	}
 
-	if len(cfg.Include.Paths) > 0 {
-		args := append([]string{"--"}, cfg.Include.Paths...)
-		args = append(args, ":!.gittend.stuck")
-		args = append(args, excludeSpecs...)
-		if err := git.Add(repoPath, args...); err != nil {
-			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
-		}
-	} else {
-		args := append([]string{"-A", "--", ":!.gittend.stuck"}, excludeSpecs...)
-		if err := git.Add(repoPath, args...); err != nil {
-			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
-		}
+	if err := git.Add(repoPath, append([]string{"--"}, scope...)...); err != nil {
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git add", exitCodeFromErr(err), err.Error()), "staging")
 	}
 
 	diff, err := git.DiffCachedNameStatus(repoPath)
@@ -277,6 +278,23 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 		default:
 			msg = commit.Generate(diff, cfg.Commit.Emoji, cfg.Commit.FallbackThresh)
 		}
+		// A model or agent run can hold the tick open for model_timeout, so
+		// staging that happens during it is invisible to the tick-start check.
+		// Re-check immediately before committing: the commit takes the whole
+		// index, so one staged out-of-scope path can end up in it.
+		if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
+			return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error()), "checking for staged paths outside the write scope")
+		} else if outside {
+			// This tick already staged its own scope, and a skip must not leave
+			// that behind: the human's commit would sweep it in under their
+			// message. Unstage the pathspecs this tick staged, never the whole
+			// index. In-scope work a human staged returns to the working tree,
+			// and the next tick stages it again.
+			if err := git.Unstage(repoPath, scope...); err != nil {
+				return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git reset", exitCodeFromErr(err), err.Error()), "unstaging after the write-scope re-check")
+			}
+			return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
+		}
 		if err := git.Commit(repoPath, msg, cfg.Commit.NoVerify); err != nil {
 			return stuckResult(err, writeStuck(stateDir, repoPath, "hook_failed", "git commit", exitCodeFromErr(err), err.Error()), "commit")
 		}
@@ -306,10 +324,28 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	return SyncResult{State: "ok"}
 }
 
+// stagedSpecs returns the pathspecs git-tend stages: the [include] paths, or the
+// whole tree when unset, minus the [exclude] paths. The stuck sentinel is never
+// staged. An unstage after a skip uses this same list, so it removes exactly
+// what the tick staged and nothing a human did.
+func stagedSpecs(cfg *config.Config) []string {
+	specs := []string{"."}
+	if len(cfg.Include.Paths) > 0 {
+		specs = append([]string{}, cfg.Include.Paths...)
+	}
+	specs = append(specs, ":!.gittend.stuck")
+	return append(specs, translateExcludePaths(cfg.Exclude.Paths)...)
+}
+
+// translateExcludePaths turns [exclude] entries into pathspecs that subtract
+// paths. An already-magic entry keeps its magic, prefixed with exclude. A
+// negative entry has no meaning here, because the list is already subtracted.
+// The config parser rejects those at parse time. One that arrives from a
+// hand-built config becomes a spec matching nothing, not a wildcard.
 func translateExcludePaths(paths []string) []string {
 	specs := make([]string, len(paths))
 	for i, p := range paths {
-		if strings.HasPrefix(p, ":(") {
+		if _, _, longForm := config.SpecMagic(p); longForm {
 			specs[i] = ":(" + "exclude," + p[2:]
 		} else {
 			specs[i] = ":(exclude)" + p

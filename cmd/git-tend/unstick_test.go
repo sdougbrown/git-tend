@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/git-tend/internal/paths"
+	"github.com/sdougbrown/git-tend/internal/status"
 	gitSync "github.com/sdougbrown/git-tend/internal/sync"
 )
 
@@ -124,5 +125,85 @@ func testGitOK(t *testing.T, dir string, args ...string) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// An index-only sentinel outlives the working-tree file, for example after a
+// `git add -A` during the episode. The scope guard excludes the sentinel from the
+// paths it owns, so leaving it staged would skip every tick with no way back.
+func TestUnstickClearsStagedStuckFlag(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	repo := t.TempDir()
+	testGitOK(t, repo, "init")
+	testGitOK(t, repo, "config", "user.email", "test@gittend.local")
+	testGitOK(t, repo, "config", "user.name", "git-tend test")
+	testGitOK(t, repo, "commit", "--allow-empty", "-m", "init")
+
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), []byte("stuck_at = \"now\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", ".gittend.stuck")
+	// The daemon or the operator clears the file first; the index entry stays.
+	if err := os.Remove(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeStuckFlag(repo); err != nil {
+		t.Fatalf("removeStuckFlag() error: %v", err)
+	}
+
+	out, err := exec.Command("git", "-C", repo, "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	staged := strings.TrimSpace(string(out))
+	if strings.Contains(staged, ".gittend.stuck") {
+		t.Errorf("staged = %q, the sentinel must be unstaged", staged)
+	}
+}
+
+// `unstick --all` finds repos through status.json, and a sentinel that lives only
+// in the index has no file to stat, so the bulk path has to look at the index too.
+func TestUnstickAllFindsIndexOnlySentinel(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	stateDir := paths.StateDir()
+
+	repo := t.TempDir()
+	testGitOK(t, repo, "init")
+	testGitOK(t, repo, "config", "user.email", "test@gittend.local")
+	testGitOK(t, repo, "config", "user.name", "git-tend test")
+	testGitOK(t, repo, "commit", "--allow-empty", "-m", "init")
+
+	if err := os.WriteFile(filepath.Join(repo, ".gittend.stuck"), []byte("stuck_at = \"now\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", ".gittend.stuck")
+	// Only the index entry survives, which is the state `--all` used to skip.
+	if err := os.Remove(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := status.UpdateRepo(filepath.Join(stateDir, "status.json"), repo, func(rs status.RepoStatus) status.RepoStatus {
+		rs.CurrentState = "stuck"
+		return rs
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unstickAllRepos(); err != nil {
+		t.Fatalf("unstickAllRepos() error: %v", err)
+	}
+	out, err := exec.Command("git", "-C", repo, "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	if strings.Contains(string(out), ".gittend.stuck") {
+		t.Errorf("index still holds the sentinel: %q", string(out))
 	}
 }

@@ -61,6 +61,26 @@ func Add(repoPath string, args ...string) error {
 	return cmd.Run()
 }
 
+// StagedPath reports whether path is in the index, which is how an index-only
+// entry is told apart from one that also has a working-tree file.
+func StagedPath(repoPath, path string) (bool, error) {
+	out, err := exec.Command("git", "-C", repoPath, "ls-files", "-z", "--", path).Output()
+	if err != nil {
+		return false, err
+	}
+	return len(bytes.TrimRight(out, "\x00")) > 0, nil
+}
+
+// Unstage removes the given pathspecs from the index, leaving the working tree
+// alone. It unstages exactly what the pathspecs match, so the caller decides the
+// scope. A whole-tree spec unstages everything the spec covers, including work
+// someone else staged inside it. A caller that must preserve foreign staging
+// narrows the spec accordingly.
+func Unstage(repoPath string, specs ...string) error {
+	args := append([]string{"-C", repoPath, "reset", "-q", "--"}, specs...)
+	return exec.Command("git", args...).Run()
+}
+
 func Commit(repoPath, message string, noVerify bool) error {
 	args := []string{"-C", repoPath, "commit", "-m", message}
 	if noVerify {
@@ -88,6 +108,56 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached", "--name-status", "-M")
 	out, err := cmd.Output()
 	return string(out), err
+}
+
+// StagedOutsideScope reports whether the index holds staged changes that the
+// given scope does not cover. The caller passes the declared scope, the
+// composition of [include], [exclude] and the sentinel. That is a superset of the
+// pathspecs the tick actually stages with, because git refuses some of them.
+// Using the declared scope is deliberate: work staged under a refused pathspec is
+// still someone else's, not this commit's. Nothing staged means nothing to
+// protect.
+func StagedOutsideScope(repoPath string, scopeSpecs []string) (bool, error) {
+	staged, err := stagedNames(repoPath, nil)
+	if err != nil || len(staged) == 0 {
+		return false, err
+	}
+
+	names, err := stagedNames(repoPath, scopeSpecs)
+	if err != nil {
+		return false, err
+	}
+	inScope := make(map[string]struct{}, len(names))
+	for _, p := range names {
+		inScope[p] = struct{}{}
+	}
+
+	for _, p := range staged {
+		if _, ok := inScope[p]; !ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// stagedNames returns the staged paths matching the given pathspecs, with no
+// pathspecs meaning every staged path. git evaluates the pathspecs, so a
+// negative entry counts paths out exactly as it does for `git add`.
+func stagedNames(repoPath string, specs []string) ([]string, error) {
+	// Rename detection would report a staged rename only as its destination, so a
+	// rename whose source sits outside the scope would pass the guard whole.
+	// --no-renames lists both sides, and the out-of-scope deletion is caught.
+	args := []string{"-C", repoPath, "diff", "--cached", "--name-only", "--no-renames", "-z", "--"}
+	args = append(args, specs...)
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimRight(string(out), "\x00")
+	if trimmed == "" {
+		return nil, nil
+	}
+	return strings.Split(trimmed, "\x00"), nil
 }
 
 func DiffCached(repoPath string) (string, error) {

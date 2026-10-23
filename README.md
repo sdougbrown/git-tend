@@ -24,7 +24,7 @@ The daemon also tracks an "offline" state separately from "stuck." If a fetch or
 
 ## Install
 
-**Prerequisites:** macOS or Linux. The binary is statically compiled — no runtime dependencies.
+**Prerequisites:** macOS or Linux, and **git 2.13 or newer** on `PATH`. The binary is statically compiled apart from that. 2.13 is where `git rev-parse --absolute-git-dir`, which the daemon uses to find the repository, arrives; deletions have been staged by a pathspec `git add` since 2.0.
 
 Download a release binary from the [releases page](https://github.com/sdougbrown/git-tend/releases/latest) and put it on your `PATH`. Replace `<os>` with `darwin` or `linux` and `<arch>` with `arm64` or `amd64`:
 
@@ -302,10 +302,27 @@ no_verify = false
 
 [include]
 # Stage only these paths (relative to repo root). If empty, stages everything.
+#
+# Staging is scoped but committing is not: git-tend commits the index, so with
+# paths set it only ever adds its own scope to it. Anything already staged
+# outside these paths therefore belongs to a commit someone is preparing by
+# hand, and the tick is skipped — temporary, not stuck, and nothing to unstick.
+# The next tick resumes once the index is clear again. Staged paths inside the
+# scope are indistinguishable from git-tend's own work and get committed.
+# `git-tend run` does not bypass this: a skip means the index holds work
+# git-tend was not going to stage.
+#
+# Negative pathspecs are accepted and mean "everything except", as git defines
+# them: paths = [":!vendor/"] manages the whole repo apart from vendor/. For a
+# positive list, [exclude] says the same thing.
 paths = ["src/", "config/"]
 
 [exclude]
-# Exclude these paths from staging. Uses git pathspec syntax.
+# Exclude these paths from staging. Uses git pathspec syntax, positive specs
+# only: a negative entry is contradictory here, since the list is already
+# subtracted. Staged work under an excluded path is not git-tend's to commit
+# either, so it backs the tick off the same way staged work outside [include]
+# does.
 paths = ["secrets/", "*.log"]
 
 [notify]
@@ -400,7 +417,8 @@ With `strategy = "agent"` the configured command becomes a **message author**,
 not an executor. The daemon — never the agent — runs every git command:
 
 1. The usual guards run first: per-repo flock, git lock check,
-   `in_progress_window` back-off, debounce quiet-time check.
+   `in_progress_window` back-off, debounce quiet-time check,
+   staged-outside-scope check.
 2. Changes are staged (`git add`), and the **full** staged diff is captured
    (`git diff --cached`, capped at 16 KiB with a truncation note).
 3. The agent command runs with `repo:`, `branch:`, the diff, and the prompt on
