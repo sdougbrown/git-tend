@@ -2109,3 +2109,64 @@ func TestSyncScopeEntryLooksLikeOption(t *testing.T) {
 		t.Error("outside.txt is out of scope and must not be committed")
 	}
 }
+
+// Staging a matched scope must carry deletions, which is why the probe keeps a
+// spec whose only match is a tracked-but-deleted file.
+func TestSyncCommitsDeletionInScope(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"src/"}, nil)
+	if err := os.WriteFile(filepath.Join(repo, "src", "gone.txt"), []byte("gone"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", ".gittend", "src/gone.txt")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.Remove(filepath.Join(repo, "src", "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"src/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "gone.txt")); err == nil {
+		t.Error("the deletion should be committed")
+	}
+}
+
+// A scope that cannot be resolved is a real git failure: it must surface as an
+// error rather than being swallowed into "nothing to stage".
+func TestStagedPathsPropagatesProbeError(t *testing.T) {
+	cfg := &config.Config{Include: config.IncludeConfig{Paths: []string{"src/"}}}
+	if _, err := stagedPaths(t.TempDir(), cfg); err == nil {
+		t.Error("stagedPaths() = nil error outside a git repo, want an error")
+	}
+}
