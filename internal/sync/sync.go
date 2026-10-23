@@ -291,7 +291,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 			// index. In-scope work a human staged returns to the working tree,
 			// and the next tick stages it again.
 			if err := git.Unstage(repoPath, scope...); err != nil {
-				return SyncResult{State: "stuck", Error: fmt.Sprintf("unstaging after the write-scope re-check: %v", err)}
+				return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git reset", exitCodeFromErr(err), err.Error()), "unstaging after the write-scope re-check")
 			}
 			return SyncResult{State: "skipped", Error: "staged changes outside the write scope"}
 		}

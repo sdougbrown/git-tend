@@ -1882,3 +1882,67 @@ func TestSyncMalformedIncludeSticks(t *testing.T) {
 		t.Error("nothing should be committed when the scope cannot be read")
 	}
 }
+
+// A failed unstage is the hazard the unstage exists to prevent, so it has to be a
+// stuck episode. The tick's own staging stays in the index, and without the flag
+// and record the agent never hears about it. The model command makes the
+// repository unwritable: that breaks `git reset`, not the read-only probe.
+func TestSyncUnstageFailureSticks(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+	gitDir := strings.TrimSpace(testGit(t, repo, "rev-parse", "--absolute-git-dir"))
+	t.Cleanup(func() {
+		// Leave the temp tree removable.
+		exec.Command("chmod", "-R", "u+w", gitDir).Run()
+	})
+
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"src/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Someone stages work outside the scope while the model authors the message.
+	// The model command also makes the git directory read-only, so the unstage
+	// that follows cannot run.
+	if err := os.WriteFile(filepath.Join(repo, "outside.txt"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji:    "🐌",
+			Strategy: "model",
+			ModelCmd: "git -C " + repo + " add outside.txt && chmod -R a-w " + gitDir + " && echo 'sync things'",
+		},
+		Include: config.IncludeConfig{Paths: []string{"src/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "stuck" {
+		t.Fatalf("expected stuck when the unstage cannot run, got %s: %s", result.State, result.Error)
+	}
+	if !strings.Contains(result.Error, "unstaging") {
+		t.Errorf("Error = %q, want it to name the unstage", result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err != nil {
+		t.Errorf("stuck flag should be written when the unstage fails: %v", err)
+	}
+}
