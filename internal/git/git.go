@@ -62,8 +62,10 @@ func Add(repoPath string, args ...string) error {
 }
 
 // Unstage removes the given pathspecs from the index, leaving the working tree
-// alone. It never resets the whole index: the caller passes exactly the paths it
-// staged, so work someone else staged stays staged.
+// alone. It unstages exactly what the pathspecs match, so the caller decides the
+// scope. A whole-tree spec unstages everything the spec covers, including work
+// someone else staged inside it. A caller that must preserve foreign staging
+// narrows the spec accordingly.
 func Unstage(repoPath string, specs ...string) error {
 	args := append([]string{"-C", repoPath, "reset", "-q", "--"}, specs...)
 	return exec.Command("git", args...).Run()

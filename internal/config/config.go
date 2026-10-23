@@ -526,9 +526,11 @@ func rawAgentMaxAttemptsPresent(raw map[string]any) bool {
 	return false
 }
 
-// isNegativePathspec reports whether p leaves paths out, in either magic form:
-// the short :! and :^ forms, or :(...) listing exclude or negative.
-func isNegativePathspec(p string) bool {
+// NegativePathspec reports whether p leaves paths out, in either magic form: the
+// short :! and :^ forms, or :(...) listing exclude or negative. This is the one
+// place that knows the vocabulary. internal/sync composes the same forms when it
+// translates [exclude] paths for the staging, so the two stay aligned.
+func NegativePathspec(p string) bool {
 	if strings.HasPrefix(p, ":!") || strings.HasPrefix(p, ":^") {
 		return true
 	}
@@ -588,7 +590,7 @@ func finalizeConfig(cfg *Config) error {
 	// excluded. [include] accepts negatives, because git evaluates them for the
 	// staging and for the guard alike.
 	for _, p := range cfg.Exclude.Paths {
-		if isNegativePathspec(p) {
+		if NegativePathspec(p) {
 			return fmt.Errorf("invalid exclude path %q: negative pathspecs are contradictory there, [exclude] already subtracts paths", p)
 		}
 	}
