@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -158,6 +159,46 @@ func stagedNames(repoPath string, specs []string) ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(trimmed, "\x00"), nil
+}
+
+// MatchingSpecs returns the pathspecs `git add` accepts. One refused pathspec
+// fails the whole staging, which would stick the repo on every tick. Each one is
+// therefore put to `git add --dry-run`: git is the only authority on what it will
+// stage.
+//
+// A malformed pathspec or an unreadable index fails that dry run too. `ls-files`
+// then decides which it was: it parses the spec and reads the index, so its
+// failure means a broken configuration rather than a refusal. A refusal is
+// dropped. Anything else is an error, because staging nothing silently would stop
+// the scope committing with no stuck flag to show for it.
+func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
+	accepted := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		cmd := exec.Command("git", "-C", repoPath, "add", "--dry-run", "--", spec)
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if err := cmd.Run(); err == nil {
+			accepted = append(accepted, spec)
+			continue
+		} else if !errors.As(err, new(*exec.ExitError)) {
+			return nil, err
+		}
+		// The dry run failed: ask `ls-files` whether git can parse the spec at
+		// all. If it cannot, this is a broken configuration and not a refusal.
+		if err := usableSpec(repoPath, spec); err != nil {
+			return nil, err
+		}
+	}
+	return accepted, nil
+}
+
+// usableSpec reports whether git can parse spec at all. It reads only the index,
+// so it answers "is this a real pathspec" without applying acceptance rules.
+func usableSpec(repoPath, spec string) error {
+	cmd := exec.Command("git", "-C", repoPath, "ls-files", "-z", "--cached", "--", spec)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git ls-files -- %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func DiffCached(repoPath string) (string, error) {

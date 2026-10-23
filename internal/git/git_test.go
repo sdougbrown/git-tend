@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+// initRepo creates a temporary repository with a local identity, so tests that
+// commit do not depend on the machine (or CI runner) having one.
+func initRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	run(t, repo, "config", "user.name", "git-tend test")
+	run(t, repo, "config", "user.email", "test@gittend.local")
+	return repo
+}
+
 func TestCommitEditRecent(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "init", "-q")
@@ -294,11 +305,7 @@ func TestIsNetworkError(t *testing.T) {
 }
 
 func TestStagedOutsideScope(t *testing.T) {
-	repo := t.TempDir()
-	run(t, repo, "init", "-q")
-	// CI runners ship without a default identity, so the commit below needs one.
-	run(t, repo, "config", "user.name", "git-tend test")
-	run(t, repo, "config", "user.email", "test@gittend.local")
+	repo := initRepo(t)
 	for _, d := range []string{"memory", "notes", "src/secrets", "projects/x/memory"} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
 			t.Fatal(err)
@@ -368,8 +375,7 @@ func TestStagedOutsideScope(t *testing.T) {
 // empty inversion therefore has to mean "everything is inside the scope", not
 // "nothing is".
 func TestStagedOutsideScopeWithoutInclude(t *testing.T) {
-	repo := t.TempDir()
-	run(t, repo, "init", "-q")
+	repo := initRepo(t)
 	for _, d := range []string{"src", "secrets"} {
 		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
 			t.Fatal(err)
@@ -508,8 +514,173 @@ func TestStagedOutsideScopeNegativeInclude(t *testing.T) {
 	}
 }
 
+// sameSpecs compares pathspec lists as sets: MatchingSpecs makes no ordering
+// promise, and callers pass the result to `git add`, where order is irrelevant.
+func sameSpecs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+	}
+	for _, n := range seen {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
 	if _, err := StagedOutsideScope(t.TempDir(), []string{"src/"}); err == nil {
 		t.Error("StagedOutsideScope() = nil error outside a git repo, want an error")
 	}
+}
+
+// MatchingSpecs asks `git add` itself which pathspecs it accepts, so these cases
+// pin git's acceptance rules rather than a reimplementation of them.
+func TestMatchingSpecs(t *testing.T) {
+	t.Run("literal and glob paths that exist", func(t *testing.T) {
+		repo := initRepo(t)
+		for _, d := range []string{"src", "projects/alpha"} {
+			if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, f := range []string{"src/a.txt", "projects/alpha/note.md"} {
+			if err := os.WriteFile(filepath.Join(repo, f), []byte(f), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		specs := []string{"src/", ":(glob)projects/*/memory/*", "missing/"}
+
+		got, err := MatchingSpecs(repo, specs)
+		if err != nil {
+			t.Fatalf("MatchingSpecs() error: %v", err)
+		}
+		// The glob has no memory directory yet and missing/ does not exist.
+		if !sameSpecs(got, []string{"src/"}) {
+			t.Errorf("MatchingSpecs() = %v, want [src/]", got)
+		}
+
+		// Once the glob's directory exists it is accepted too.
+		if err := os.MkdirAll(filepath.Join(repo, "projects/alpha/memory"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "projects/alpha/memory/note.md"), []byte("n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		got, err = MatchingSpecs(repo, specs)
+		if err != nil {
+			t.Fatalf("MatchingSpecs() error: %v", err)
+		}
+		if !sameSpecs(got, []string{"src/", ":(glob)projects/*/memory/*"}) {
+			t.Errorf("MatchingSpecs() = %v, want both matching specs", got)
+		}
+	})
+
+	t.Run("tracked deletion", func(t *testing.T) {
+		repo := initRepo(t)
+		if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "src", "a.txt"), []byte("a"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "add", "src/a.txt")
+		run(t, repo, "commit", "-q", "-m", "track src/a.txt")
+		if err := os.Remove(filepath.Join(repo, "src", "a.txt")); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := MatchingSpecs(repo, []string{"src/"})
+		if err != nil {
+			t.Fatalf("MatchingSpecs() error: %v", err)
+		}
+		if !sameSpecs(got, []string{"src/"}) {
+			t.Errorf("MatchingSpecs() = %v, want the spec kept for a staged deletion", got)
+		}
+	})
+
+	t.Run("ignored file path", func(t *testing.T) {
+		repo := initRepo(t)
+		if err := os.MkdirAll(filepath.Join(repo, "scoped"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "scoped", "trace.log"), []byte("ignored"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// `git add` refuses an ignored file path, so keeping it would fail the
+		// whole staging.
+		if got, err := MatchingSpecs(repo, []string{"scoped/trace.log"}); err != nil {
+			t.Fatalf("MatchingSpecs() error: %v", err)
+		} else if len(got) != 0 {
+			t.Errorf("MatchingSpecs() = %v, want the ignored file path dropped", got)
+		}
+
+		// A directory holding only ignored files is accepted as a no-op, and kept.
+		if got, err := MatchingSpecs(repo, []string{"scoped/"}); err != nil {
+			t.Fatalf("MatchingSpecs() error: %v", err)
+		} else if len(got) != 1 {
+			t.Errorf("MatchingSpecs() = %v, want the ignored-only directory kept", got)
+		}
+	})
+
+	t.Run("sparse-excluded path", func(t *testing.T) {
+		repo := initRepo(t)
+		for _, d := range []string{"kept", "other"} {
+			if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, f := range []string{"kept/k.txt", "other/o.txt"} {
+			if err := os.WriteFile(filepath.Join(repo, f), []byte(f), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		run(t, repo, "add", "-A")
+		run(t, repo, "commit", "-q", "-m", "init")
+		// Older gits spell sparse-checkout differently, so skip rather than fail
+		// where the setup itself is unavailable.
+		if err := exec.Command("git", "-C", repo, "sparse-checkout", "set", "kept").Run(); err != nil {
+			t.Skipf("sparse-checkout unavailable: %v", err)
+		}
+
+		// `git add` refuses a path outside the sparse cone even though the index
+		// still lists it; predicting that from the index would keep the spec and
+		// fail the staging.
+		got, err := MatchingSpecs(repo, []string{"kept/", "other/"})
+		if err != nil {
+			t.Fatalf("MatchingSpecs() error: %v", err)
+		}
+		if !sameSpecs(got, []string{"kept/"}) {
+			t.Errorf("MatchingSpecs() = %v, want only the in-cone spec", got)
+		}
+	})
+
+	t.Run("malformed pathspec is an error", func(t *testing.T) {
+		repo := initRepo(t)
+		if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("a"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// Dropping this silently would leave the repo committing nothing, with no
+		// stuck flag and no error to show for it.
+		if _, err := MatchingSpecs(repo, []string{":(typo)a.txt"}); err == nil {
+			t.Error("MatchingSpecs() = nil error for an unparseable pathspec, want an error")
+		}
+	})
+
+	t.Run("error outside a repository", func(t *testing.T) {
+		if _, err := MatchingSpecs(t.TempDir(), []string{"src/"}); err == nil {
+			t.Error("MatchingSpecs() = nil error outside a git repo, want an error")
+		}
+	})
 }

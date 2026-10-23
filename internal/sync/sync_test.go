@@ -1946,3 +1946,276 @@ func TestSyncUnstageFailureSticks(t *testing.T) {
 		t.Errorf("stuck flag should be written when the unstage fails: %v", err)
 	}
 }
+
+// A scope glob with no matches yet must not stick the repo. `git add` exits 128
+// on a pathspec that names no existing path, and a fresh clone has no
+// projects/*/memory directory until someone creates one.
+func TestSyncIncludeGlobWithNoMatches(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	include := []string{"src/", ":(glob)projects/*/memory/*"}
+	writeTestConfig(t, repo, "read-write", "main", "0s", include, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: include},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok with an unmatched glob in the scope, got %s: %s", result.State, result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err == nil {
+		t.Error("an unmatched scope glob must not write the stuck flag")
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "keep.txt")); err != nil {
+		t.Error("src/keep.txt should be committed while the glob matches nothing")
+	}
+}
+
+// A scope that matches nothing at all leaves the tick with nothing to stage, and
+// it still syncs.
+func TestSyncIncludeMatchesNothing(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"future/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	// Dirty, but outside the scope.
+	if err := os.WriteFile(filepath.Join(repo, "notes.txt"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"future/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok when the scope matches nothing, got %s: %s", result.State, result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gittend.stuck")); err == nil {
+		t.Error("a scope that matches nothing must not write the stuck flag")
+	}
+
+	// Falling back to staging everything when the scope matches nothing would
+	// sweep the out-of-scope file in, so pin it.
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "notes.txt")); err == nil {
+		t.Error("notes.txt is out of scope and must not be committed")
+	}
+}
+
+// A scope entry that looks like a git option must reach `git add` as a path, not
+// a flag. Without the `--` separator a scoped `-A` would stage the whole tree
+// and defeat the write scope.
+func TestSyncScopeEntryLooksLikeOption(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "-A"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"-A/"}, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(repo, "-A", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Outside the scope: staging it would prove the scope was bypassed.
+	if err := os.WriteFile(filepath.Join(repo, "outside.txt"), []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"-A/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok for an option-looking scope entry, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "-A", "keep.txt")); err != nil {
+		t.Error("-A/keep.txt should be committed")
+	}
+	if _, err := os.Stat(filepath.Join(clone2, "outside.txt")); err == nil {
+		t.Error("outside.txt is out of scope and must not be committed")
+	}
+}
+
+// Staging a matched scope must carry deletions, which is why the probe keeps a
+// spec whose only match is a tracked-but-deleted file.
+func TestSyncCommitsDeletionInScope(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfig(t, repo, "read-write", "main", "0s", []string{"src/"}, nil)
+	if err := os.WriteFile(filepath.Join(repo, "src", "gone.txt"), []byte("gone"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", ".gittend", "src/gone.txt")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.Remove(filepath.Join(repo, "src", "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: []string{"src/"}},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "gone.txt")); err == nil {
+		t.Error("the deletion should be committed")
+	}
+}
+
+// A scope that cannot be resolved is a real git failure: it must surface as an
+// error rather than being swallowed into "nothing to stage".
+func TestStagedPathsPropagatesProbeError(t *testing.T) {
+	cfg := &config.Config{Include: config.IncludeConfig{Paths: []string{"src/"}}}
+	if _, err := stagedPaths(t.TempDir(), cfg); err == nil {
+		t.Error("stagedPaths() = nil error outside a git repo, want an error")
+	}
+}
+
+// Whole-repo staging has no include pathspec, only `.`, and still has to record
+// deletions: the tick stages with `git add -- .`, which records them since git
+// 2.0.
+func TestSyncCommitsDeletionWithoutInclude(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	writeTestConfig(t, repo, "read-write", "main", "0s", nil, nil)
+	if err := os.WriteFile(filepath.Join(repo, "gone.txt"), []byte("gone"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", ".gittend", "gone.txt")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	if err := os.Remove(filepath.Join(repo, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "gone.txt")); err == nil {
+		t.Error("the deletion should be committed in whole-repo mode")
+	}
+}
