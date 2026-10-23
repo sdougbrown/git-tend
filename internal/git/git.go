@@ -131,7 +131,10 @@ func StagedOutsideScope(repoPath string, scopeSpecs []string) (bool, error) {
 // pathspecs meaning every staged path. git evaluates the pathspecs, so a
 // negative entry counts paths out exactly as it does for `git add`.
 func stagedNames(repoPath string, specs []string) ([]string, error) {
-	args := []string{"-C", repoPath, "diff", "--cached", "--name-only", "-z", "--"}
+	// Rename detection would report a staged rename only as its destination, so a
+	// rename whose source sits outside the scope would pass the guard whole.
+	// --no-renames lists both sides, and the out-of-scope deletion is caught.
+	args := []string{"-C", repoPath, "diff", "--cached", "--name-only", "--no-renames", "-z", "--"}
 	args = append(args, specs...)
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {

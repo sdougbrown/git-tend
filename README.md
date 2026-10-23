@@ -417,8 +417,8 @@ With `strategy = "agent"` the configured command becomes a **message author**,
 not an executor. The daemon — never the agent — runs every git command:
 
 1. The usual guards run first: per-repo flock, git lock check,
-   `in_progress_window` back-off, staged-outside-scope check, debounce
-   quiet-time check.
+   `in_progress_window` back-off, debounce quiet-time check,
+   staged-outside-scope check.
 2. Changes are staged (`git add`), and the **full** staged diff is captured
    (`git diff --cached`, capped at 16 KiB with a truncation note).
 3. The agent command runs with `repo:`, `branch:`, the diff, and the prompt on

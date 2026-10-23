@@ -401,6 +401,68 @@ func TestStagedOutsideScopeWithoutInclude(t *testing.T) {
 	}
 }
 
+// A staged rename has two sides. With rename detection on, git reports only the
+// destination, so renaming a file into the scope would hide the out-of-scope
+// deletion of its source.
+func TestStagedOutsideScopeRename(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	run(t, repo, "config", "user.name", "git-tend test")
+	run(t, repo, "config", "user.email", "test@gittend.local")
+	for _, d := range []string{"src", "outside"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "outside", "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "add", "-A")
+	run(t, repo, "commit", "-q", "-m", "init")
+
+	// Move an out-of-scope file into the scope: the deletion of outside/a.txt is
+	// not git-tend's to commit.
+	run(t, repo, "mv", "outside/a.txt", "src/a.txt")
+	got, err := StagedOutsideScope(repo, []string{"src/", ":!.gittend.stuck"})
+	if err != nil {
+		t.Fatalf("StagedOutsideScope() error: %v", err)
+	}
+	if !got {
+		t.Error("StagedOutsideScope() = false for a rename whose source is out of scope")
+	}
+}
+
+// Unstage removes the given paths from the index and nothing else.
+func TestUnstage(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	run(t, repo, "config", "user.name", "git-tend test")
+	run(t, repo, "config", "user.email", "test@gittend.local")
+	for _, f := range []string{"one.txt", "two.txt"} {
+		if err := os.WriteFile(filepath.Join(repo, f), []byte(f), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(t, repo, "add", "-A")
+
+	if err := Unstage(repo, "one.txt"); err != nil {
+		t.Fatalf("Unstage() error: %v", err)
+	}
+
+	staged := strings.TrimSpace(run(t, repo, "diff", "--cached", "--name-only"))
+	if staged != "two.txt" {
+		t.Errorf("staged = %q, want only two.txt", staged)
+	}
+	// The working tree is untouched by the unstage.
+	if b, err := os.ReadFile(filepath.Join(repo, "one.txt")); err != nil || string(b) != "one.txt" {
+		t.Errorf("one.txt working tree changed: %q, %v", string(b), err)
+	}
+	// A pathspec that matches nothing is a no-op, not an error.
+	if err := Unstage(repo, "missing.txt"); err != nil {
+		t.Errorf("Unstage() on an unmatched path = %v, want nil", err)
+	}
+}
+
 // A negative include spec means "everything except", which the guard has to
 // honour rather than inverting into a pathspec that matches nothing.
 func TestStagedOutsideScopeNegativeInclude(t *testing.T) {
