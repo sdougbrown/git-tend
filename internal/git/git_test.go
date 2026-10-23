@@ -514,6 +514,27 @@ func TestStagedOutsideScopeNegativeInclude(t *testing.T) {
 	}
 }
 
+// sameSpecs compares pathspec lists as sets: MatchingSpecs makes no ordering
+// promise, and callers pass the result to `git add`, where order is irrelevant.
+func sameSpecs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+	}
+	for _, n := range seen {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
 	if _, err := StagedOutsideScope(t.TempDir(), []string{"src/"}); err == nil {
 		t.Error("StagedOutsideScope() = nil error outside a git repo, want an error")
@@ -541,7 +562,8 @@ func TestMatchingSpecs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MatchingSpecs() error: %v", err)
 	}
-	if len(got) != 1 || got[0] != "src/" {
+	// Order is not part of the contract: the result feeds `git add` as a set.
+	if !sameSpecs(got, []string{"src/"}) {
 		t.Errorf("MatchingSpecs() = %v, want [src/] (glob matches no memory dir yet, missing/ does not exist)", got)
 	}
 
@@ -556,8 +578,8 @@ func TestMatchingSpecs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MatchingSpecs() error: %v", err)
 	}
-	if len(got) != 2 || got[0] != "src/" || got[1] != ":(glob)projects/*/memory/*" {
-		t.Errorf("MatchingSpecs() = %v, want both matching specs in order", got)
+	if !sameSpecs(got, []string{"src/", ":(glob)projects/*/memory/*"}) {
+		t.Errorf("MatchingSpecs() = %v, want both matching specs", got)
 	}
 
 	// A tracked file deleted from the worktree still counts: `git add` stages
