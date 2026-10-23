@@ -662,6 +662,18 @@ func TestMatchingSpecs(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed pathspec is an error", func(t *testing.T) {
+		repo := initRepo(t)
+		if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("a"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// Dropping this silently would leave the repo committing nothing, with no
+		// stuck flag and no error to show for it.
+		if _, err := MatchingSpecs(repo, []string{":(typo)a.txt"}); err == nil {
+			t.Error("MatchingSpecs() = nil error for an unparseable pathspec, want an error")
+		}
+	})
+
 	t.Run("error outside a repository", func(t *testing.T) {
 		if _, err := MatchingSpecs(t.TempDir(), []string{"src/"}); err == nil {
 			t.Error("MatchingSpecs() = nil error outside a git repo, want an error")

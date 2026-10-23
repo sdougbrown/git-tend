@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -160,19 +161,21 @@ func stagedNames(repoPath string, specs []string) ([]string, error) {
 	return strings.Split(trimmed, "\x00"), nil
 }
 
-// MatchingSpecs returns the pathspecs `git add` accepts. It asks git rather than
-// predicting its rules: `git add --dry-run` runs the same preflight, so ignored
-// files, sparse-excluded paths and paths that do not exist are refused exactly
-// as the real add refuses them. One refused pathspec fails the whole staging,
-// which would stick the repo on every tick.
+// MatchingSpecs returns the pathspecs `git add` accepts. One refused pathspec
+// fails the whole staging, which would stick the repo on every tick. Each one is
+// therefore put to `git add --dry-run`: git is the only authority on what it will
+// stage.
+//
+// A malformed pathspec or an unreadable index fails that dry run too, so
+// `ls-files` runs first to separate those from a plain refusal. A refusal is
+// dropped. Anything else is an error, because staging nothing silently would stop
+// the scope committing with no stuck flag to show for it.
 func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
-	// A missing or unreadable repository is an error, not a refused pathspec, so
-	// the caller's stuck handling still fires instead of staging nothing.
-	if _, err := GitDir(repoPath); err != nil {
-		return nil, err
-	}
 	accepted := make([]string, 0, len(specs))
 	for _, spec := range specs {
+		if err := usableSpec(repoPath, spec); err != nil {
+			return nil, err
+		}
 		cmd := exec.Command("git", "-C", repoPath, "add", "--dry-run", "--", spec)
 		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 		if err := cmd.Run(); err != nil {
@@ -185,6 +188,16 @@ func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
 		accepted = append(accepted, spec)
 	}
 	return accepted, nil
+}
+
+// usableSpec reports whether git can parse spec at all. It reads only the index,
+// so it answers "is this a real pathspec" without applying acceptance rules.
+func usableSpec(repoPath, spec string) error {
+	cmd := exec.Command("git", "-C", repoPath, "ls-files", "-z", "--cached", "--", spec)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git ls-files -- %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func DiffCached(repoPath string) (string, error) {

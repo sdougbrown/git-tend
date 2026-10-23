@@ -200,9 +200,11 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// the whole index. Staged work outside that scope belongs to a commit someone
 	// else is preparing, so leave the repo alone for this tick. Resume once the
 	// index clears. Staged work inside the scope is indistinguishable from
-	// git-tend's own, and is fair game. The guard reads the declared scope, not
-	// the filtered one: a scope that matches nothing yet still owns nothing, so
-	// anything staged is someone else's.
+	// git-tend's own, and is fair game.
+	//
+	// The guard reads the declared scope, not the filtered one. Filtering only
+	// drops pathspecs git refuses, and work staged under those is still someone
+	// else's, not this commit's.
 	scope := stagedSpecs(cfg)
 	if outside, err := git.StagedOutsideScope(repoPath, scope); err != nil {
 		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git diff --cached", exitCodeFromErr(err), err.Error()), "checking for staged paths outside the write scope")
