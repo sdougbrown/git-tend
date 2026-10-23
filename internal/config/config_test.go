@@ -666,41 +666,36 @@ on_stuck_cmd = "true"
 	}
 }
 
-func TestResolveRejectsNegativePathspecs(t *testing.T) {
-	// A negative pathspec inverts to a spec matching nothing, which would make
-	// the auto-commit scope guard treat every staged path as foreign. [exclude]
-	// expresses the same intent and composes.
-	for _, tc := range []struct {
-		name  string
-		value string
-		scope string
-	}{
-		{"include short bang", ":!docs/", "include"},
-		{"include short caret", ":^docs/", "include"},
-		{"include long form", ":(exclude)docs/", "include"},
-		{"include long form with glob", ":(exclude,glob)docs/*", "include"},
-		{"include negative word", ":(negative)docs/", "include"},
-		{"exclude short bang", ":!docs/", "exclude"},
+func TestResolveRejectsNegativeExcludePathspecs(t *testing.T) {
+	// [exclude] is already subtracted from the staging and probed directly by
+	// the auto-commit guard. A negative entry there matches nothing and would
+	// read every staged path as excluded. [include] accepts negatives.
+	for _, tc := range []struct{ name, value string }{
+		{"short bang", ":!docs/"},
+		{"short caret", ":^docs/"},
+		{"long form", ":(exclude)docs/"},
+		{"long form with glob", ":(exclude,glob)docs/*"},
+		{"negative word", ":(negative)docs/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gittend := writeConfig(t, "["+tc.scope+"]\npaths = [\"src/\", \""+tc.value+"\"]\n")
+			gittend := writeConfig(t, "[exclude]\npaths = [\""+tc.value+"\"]\n")
 			_, err := Resolve(gittend, nil, "/tmp/repo")
-			if err == nil || !strings.Contains(err.Error(), "negative pathspecs are not supported") {
+			if err == nil || !strings.Contains(err.Error(), "negative pathspecs are contradictory") {
 				t.Fatalf("expected a negative-pathspec error, got: %v", err)
 			}
-			if !strings.Contains(err.Error(), tc.scope+" path") {
-				t.Errorf("error should name the %s key, got: %v", tc.scope, err)
+			if !strings.Contains(err.Error(), "exclude path") {
+				t.Errorf("error should name the exclude key, got: %v", err)
 			}
 		})
 	}
 
-	// Positive specs, including magic ones, still parse.
-	gittend := writeConfig(t, "[include]\npaths = [\"src/\", \":(glob)projects/*/memory/*\"]\n[exclude]\npaths = [\"secrets/\"]\n")
+	// Negative [include] pathspecs are supported: they mean "everything except".
+	gittend := writeConfig(t, "[include]\npaths = [\":!docs/\", \":(exclude,glob)tmp/*\"]\n[exclude]\npaths = [\"secrets/\"]\n")
 	cfg, err := Resolve(gittend, nil, "/tmp/repo")
 	if err != nil {
 		t.Fatalf("Resolve() error: %v", err)
 	}
-	if len(cfg.Include.Paths) != 2 {
-		t.Errorf("Include.Paths = %v, want both positive specs kept", cfg.Include.Paths)
+	if len(cfg.Include.Paths) != 2 || cfg.Include.Paths[0] != ":!docs/" {
+		t.Errorf("Include.Paths = %v, want both negative specs kept", cfg.Include.Paths)
 	}
 }

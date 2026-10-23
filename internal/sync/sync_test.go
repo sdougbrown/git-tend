@@ -1549,3 +1549,67 @@ func TestSyncSkipsWhenStagedExcludedWithoutInclude(t *testing.T) {
 		}
 	}
 }
+
+// A negative include spec means "everything except". The guard has to read it
+// the way git does rather than treating the scope as empty.
+func TestSyncNegativeIncludeScope(t *testing.T) {
+	remote := gitInitBare(t)
+	defer os.RemoveAll(remote)
+	repo := gitClone(t, remote)
+	defer os.RemoveAll(repo)
+
+	for _, d := range []string{"notes", "src"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	include := []string{":!notes/"}
+	writeTestConfig(t, repo, "read-write", "main", "0s", include, nil)
+	testGitOK(t, repo, "add", ".gittend")
+	testGitOK(t, repo, "commit", "-m", "initial config")
+	testGitOK(t, repo, "push", "origin", "main")
+
+	stateDir, err := os.MkdirTemp("", "gittend-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+
+	cfg := &config.Config{
+		Mode:       "read-write",
+		SyncBranch: "main",
+		Interval:   "30s",
+		Debounce:   "0s",
+		Commit: config.CommitConfig{
+			Emoji: "🐌",
+		},
+		Include: config.IncludeConfig{Paths: include},
+	}
+
+	// Staged work under the excluded-by-negation path is someone else's.
+	if err := os.WriteFile(filepath.Join(repo, "notes", "scratch.md"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGitOK(t, repo, "add", "notes/scratch.md")
+	if err := os.WriteFile(filepath.Join(repo, "src", "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "skipped" {
+		t.Fatalf("expected skipped (staged path the negative include leaves out), got %s: %s", result.State, result.Error)
+	}
+
+	// Everything else is in scope, so the tick commits it once the index clears.
+	testGitOK(t, repo, "commit", "-m", "manual commit")
+	result = Sync(context.Background(), repo, cfg, stateDir)
+	if result.State != "ok" {
+		t.Fatalf("expected ok, got %s: %s", result.State, result.Error)
+	}
+
+	clone2 := gitClone(t, remote)
+	defer os.RemoveAll(clone2)
+	if _, err := os.Stat(filepath.Join(clone2, "src", "keep.txt")); err != nil {
+		t.Error("src/keep.txt is in the negative include scope and should be committed")
+	}
+}

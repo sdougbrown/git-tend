@@ -180,12 +180,11 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// the scope is indistinguishable from git-tend's own, and is fair game. An
 	// [exclude] with no [include] still narrows the staging, so it is checked on
 	// its own.
-	invertedScope := translateExcludePaths(cfg.Include.Paths)
 	stagedOutsideScope := func() (bool, error) {
-		if len(invertedScope) == 0 && len(cfg.Exclude.Paths) == 0 {
+		if len(cfg.Include.Paths) == 0 && len(cfg.Exclude.Paths) == 0 {
 			return false, nil
 		}
-		return git.StagedOutsideScope(repoPath, invertedScope, cfg.Exclude.Paths)
+		return git.StagedOutsideScope(repoPath, cfg.Include.Paths, cfg.Exclude.Paths)
 	}
 
 	if outside, err := stagedOutsideScope(); err != nil {

@@ -314,7 +314,7 @@ func TestStagedOutsideScope(t *testing.T) {
 	outside := func() bool {
 		t.Helper()
 		got, err := StagedOutsideScope(repo,
-			[]string{":(exclude)memory/", ":(exclude,glob)projects/*/memory/*"},
+			[]string{"memory/", ":(glob)projects/*/memory/*"},
 			[]string{"src/secrets/"})
 		if err != nil {
 			t.Fatalf("StagedOutsideScope() error: %v", err)
@@ -401,8 +401,53 @@ func TestStagedOutsideScopeWithoutInclude(t *testing.T) {
 	}
 }
 
+// A negative include spec means "everything except", which the guard has to
+// honour rather than inverting into a pathspec that matches nothing.
+func TestStagedOutsideScopeNegativeInclude(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "init", "-q")
+	for _, d := range []string{"docs", "src", "tmp"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"docs/a.md", "src/b.go", "tmp/c.log"} {
+		if err := os.WriteFile(filepath.Join(repo, f), []byte(f), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := func() bool {
+		t.Helper()
+		got, err := StagedOutsideScope(repo, []string{":!docs/", ":(exclude,glob)tmp/*"}, nil)
+		if err != nil {
+			t.Fatalf("StagedOutsideScope() error: %v", err)
+		}
+		return got
+	}
+
+	// src/b.go is the only staged path left after "everything except docs/ and
+	// tmp/*", so it is inside the scope.
+	run(t, repo, "add", "src/b.go")
+	if outside() {
+		t.Error("StagedOutsideScope() = true for a staged path the negative include keeps")
+	}
+
+	// A staged path the negative include names is outside the scope.
+	run(t, repo, "add", "docs/a.md")
+	if !outside() {
+		t.Error("StagedOutsideScope() = false for a staged path the negative include excludes")
+	}
+	run(t, repo, "reset", "-q", "docs/a.md")
+
+	// So is a staged path the magic negative leaves out.
+	run(t, repo, "add", "tmp/c.log")
+	if !outside() {
+		t.Error("StagedOutsideScope() = false for a staged path a magic negative excludes")
+	}
+}
+
 func TestStagedOutsideScopeErrorsOutsideRepo(t *testing.T) {
-	if _, err := StagedOutsideScope(t.TempDir(), []string{":(exclude)src/"}, nil); err == nil {
+	if _, err := StagedOutsideScope(t.TempDir(), []string{"src/"}, nil); err == nil {
 		t.Error("StagedOutsideScope() = nil error outside a git repo, want an error")
 	}
 }

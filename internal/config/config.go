@@ -582,23 +582,14 @@ func finalizeConfig(cfg *Config) error {
 		cfg.Commit.Emoji = "🐌"
 	}
 
-	// The auto-commit guard inverts [include] to find staged work git-tend does
-	// not stage itself, and that only holds for positive pathspecs. A negative
-	// one inverts to a spec matching nothing; an exclude-only list that matches
-	// nothing covers the whole tree. Every staged path then reads as foreign. A
-	// negative pathspec only ever stands in for an [exclude] entry, which
-	// composes with the guard.
-	for _, scope := range []struct {
-		key   string
-		paths []string
-	}{
-		{"include", cfg.Include.Paths},
-		{"exclude", cfg.Exclude.Paths},
-	} {
-		for _, p := range scope.paths {
-			if isNegativePathspec(p) {
-				return fmt.Errorf("invalid %s path %q: negative pathspecs are not supported, list the paths to leave out under [exclude] instead", scope.key, p)
-			}
+	// A negative pathspec in [exclude] is contradictory. That list is already
+	// subtracted from the staging, and the auto-commit guard probes it directly.
+	// So `:!docs/` matches nothing there, and every staged path would read as
+	// excluded. [include] accepts negatives, because git evaluates them for the
+	// staging and for the guard alike.
+	for _, p := range cfg.Exclude.Paths {
+		if isNegativePathspec(p) {
+			return fmt.Errorf("invalid exclude path %q: negative pathspecs are contradictory there, [exclude] already subtracts paths", p)
 		}
 	}
 	if cfg.Commit.Strategy == "" {

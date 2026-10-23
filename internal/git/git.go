@@ -99,34 +99,71 @@ func DiffCachedNameStatus(repoPath string) (string, error) {
 }
 
 // StagedOutsideScope reports whether the index holds staged changes that
-// git-tend's own staging never covers. Those are paths outside the write scope
-// (invertSpecs, exclude pathspecs naming that scope), plus paths it deliberately
-// leaves out (skipSpecs, positive pathspecs). Empty invertSpecs means no include
-// restriction, so everything is inside the scope. Nothing staged means nothing
-// to protect.
-func StagedOutsideScope(repoPath string, invertSpecs, skipSpecs []string) (bool, error) {
-	if len(invertSpecs) > 0 {
-		if outside, err := stagedMatching(repoPath, invertSpecs); err != nil || outside {
-			return outside, err
-		}
+// git-tend's own staging does not cover. Those are paths outside the write scope
+// as git evaluates [include], plus paths the scope deliberately leaves out
+// ([exclude]). An empty scope means no include restriction, so everything is
+// inside it. Nothing staged means nothing to protect.
+func StagedOutsideScope(repoPath string, includeSpecs, excludeSpecs []string) (bool, error) {
+	staged, err := stagedNames(repoPath, nil)
+	if err != nil {
+		return false, err
 	}
-	if len(skipSpecs) == 0 {
+	if len(staged) == 0 {
 		return false, nil
 	}
-	return stagedMatching(repoPath, skipSpecs)
+
+	inScope := make(map[string]struct{}, len(staged))
+	if len(includeSpecs) == 0 {
+		for _, p := range staged {
+			inScope[p] = struct{}{}
+		}
+	} else {
+		names, err := stagedNames(repoPath, includeSpecs)
+		if err != nil {
+			return false, err
+		}
+		for _, p := range names {
+			inScope[p] = struct{}{}
+		}
+	}
+
+	excluded := make(map[string]struct{})
+	if len(excludeSpecs) > 0 {
+		names, err := stagedNames(repoPath, excludeSpecs)
+		if err != nil {
+			return false, err
+		}
+		for _, p := range names {
+			excluded[p] = struct{}{}
+		}
+	}
+
+	for _, p := range staged {
+		if _, ok := inScope[p]; !ok {
+			return true, nil
+		}
+		if _, ok := excluded[p]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-// stagedMatching reports whether anything is staged under the given pathspecs.
-// Exclude-only pathspecs apply to the whole tree, so an inverted scope works as
-// an "outside" test.
-func stagedMatching(repoPath string, specs []string) (bool, error) {
+// stagedNames returns the staged paths matching the given pathspecs, with no
+// pathspecs meaning every staged path. git evaluates the pathspecs, so a
+// negative entry counts paths out exactly as it does for `git add`.
+func stagedNames(repoPath string, specs []string) ([]string, error) {
 	args := []string{"-C", repoPath, "diff", "--cached", "--name-only", "-z", "--"}
 	args = append(args, specs...)
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return len(bytes.TrimRight(out, "\x00")) > 0, nil
+	trimmed := strings.TrimRight(string(out), "\x00")
+	if trimmed == "" {
+		return nil, nil
+	}
+	return strings.Split(trimmed, "\x00"), nil
 }
 
 func DiffCached(repoPath string) (string, error) {
