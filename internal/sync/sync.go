@@ -216,7 +216,7 @@ func syncReadWrite(ctx context.Context, repoPath string, cfg *config.Config, sta
 	// whole `git add` and would stick the repo on every tick.
 	stagePaths, err := stagedPaths(repoPath, cfg)
 	if err != nil {
-		return SyncResult{State: "stuck", Error: fmt.Sprintf("resolving the write scope: %v", err)}
+		return stuckResult(err, writeStuck(stateDir, repoPath, "other", "git ls-files", exitCodeFromErr(err), err.Error()), "resolving the write scope")
 	}
 	if len(stagePaths) > 0 {
 		// The `--` separator is load-bearing: an include entry that looks like an
