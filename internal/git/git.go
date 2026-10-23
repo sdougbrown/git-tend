@@ -166,8 +166,9 @@ func stagedNames(repoPath string, specs []string) ([]string, error) {
 // therefore put to `git add --dry-run`: git is the only authority on what it will
 // stage.
 //
-// A malformed pathspec or an unreadable index fails that dry run too, so
-// `ls-files` runs first to separate those from a plain refusal. A refusal is
+// A malformed pathspec or an unreadable index fails that dry run too. `ls-files`
+// then decides which it was: it parses the spec and reads the index, so its
+// failure means a broken configuration rather than a refusal. A refusal is
 // dropped. Anything else is an error, because staging nothing silently would stop
 // the scope committing with no stuck flag to show for it.
 func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
