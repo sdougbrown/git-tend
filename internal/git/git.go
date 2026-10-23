@@ -160,24 +160,31 @@ func stagedNames(repoPath string, specs []string) ([]string, error) {
 	return strings.Split(trimmed, "\x00"), nil
 }
 
-// MatchingSpecs returns the given pathspecs that name at least one existing path.
-// `git add` exits 128 on a positive pathspec that names no existing path. A scope
-// naming a directory that does not exist yet therefore has to be filtered out
-// rather than passed through. The probe also applies `git add`'s ignore rules,
-// because `git add` errors on a pathspec that names an ignored file.
+// MatchingSpecs returns the pathspecs `git add` accepts. It asks git rather than
+// predicting its rules: `git add --dry-run` runs the same preflight, so ignored
+// files, sparse-excluded paths and paths that do not exist are refused exactly
+// as the real add refuses them. One refused pathspec fails the whole staging,
+// which would stick the repo on every tick.
 func MatchingSpecs(repoPath string, specs []string) ([]string, error) {
-	matched := make([]string, 0, len(specs))
+	// A missing or unreadable repository is an error, not a refused pathspec, so
+	// the caller's stuck handling still fires instead of staging nothing.
+	if _, err := GitDir(repoPath); err != nil {
+		return nil, err
+	}
+	accepted := make([]string, 0, len(specs))
 	for _, spec := range specs {
-		args := []string{"-C", repoPath, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", spec}
-		out, err := exec.Command("git", args...).Output()
-		if err != nil {
+		cmd := exec.Command("git", "-C", repoPath, "add", "--dry-run", "--", spec)
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				continue
+			}
 			return nil, err
 		}
-		if len(bytes.TrimRight(out, "\x00")) > 0 {
-			matched = append(matched, spec)
-		}
+		accepted = append(accepted, spec)
 	}
-	return matched, nil
+	return accepted, nil
 }
 
 func DiffCached(repoPath string) (string, error) {
