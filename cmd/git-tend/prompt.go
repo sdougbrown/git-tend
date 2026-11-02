@@ -24,7 +24,7 @@ var promptCmd = &clicontract.Command{
 		{Name: "no-color", Kind: clicontract.Bool, Usage: "Disable ANSI color output"},
 	},
 	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
-		return nil, runPrompt(promptOpts{
+		return runPrompt(promptOpts{
 			showOffline: inv.Bools["show-offline"],
 			anyStuck:    inv.Bools["any-stuck"],
 			noColor:     inv.Bools["no-color"],
@@ -38,14 +38,15 @@ type promptOpts struct {
 	noColor     bool
 }
 
-func runPrompt(opts promptOpts) error {
+// runPrompt prints the segment and returns the stuck-repo count.
+func runPrompt(opts promptOpts) (int, error) {
 	if os.Getenv("NO_COLOR") != "" {
 		opts.noColor = true
 	}
 
 	sf := status.Read(filepath.Join(paths.StateDir(), "status.json"))
 	if sf == nil {
-		return nil
+		return 0, nil
 	}
 
 	staleAfter := 2 * time.Duration(sf.IntervalSeconds) * time.Second
@@ -97,9 +98,5 @@ func runPrompt(opts promptOpts) error {
 		fmt.Print(output)
 	}
 
-	if opts.anyStuck && stuckCount > 0 {
-		os.Exit(1)
-	}
-
-	return nil
+	return stuckCount, nil
 }

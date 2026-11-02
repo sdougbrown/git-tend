@@ -52,10 +52,17 @@ func (tendAdapter) ErrorResult(command string, err error) any { return nil }
 // Write is a no-op: handlers print their own output.
 func (tendAdapter) Write(w io.Writer, result any) error { return nil }
 
-// ExitCode reports 1 for every failure, 0 otherwise.
+// ExitCode reports 1 for every failure, 0 otherwise — plus the declared
+// prompt convention: `prompt --any-stuck` exits 1 when the returned stuck
+// count is nonzero.
 func (tendAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr error) int {
 	if handlerErr != nil {
 		return 1
+	}
+	if inv.Command == "prompt" && inv.Bools["any-stuck"] {
+		if stuck, ok := result.(int); ok && stuck > 0 {
+			return 1
+		}
 	}
 	return 0
 }

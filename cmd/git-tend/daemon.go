@@ -18,11 +18,13 @@ var daemonCmd = &clicontract.Command{
 	Short: "Run the sync daemon (foreground)",
 	Long:  `Start the git-tend daemon in the foreground. Used by launchd/systemd.`,
 	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
-		return nil, runDaemon(ctx)
+		// The daemon owns its lifecycle signals (SIGINT/SIGTERM shut down
+		// between ticks); Run's context would cancel in-flight syncs.
+		return nil, runDaemon()
 	},
 }
 
-func runDaemon(ctx context.Context) error {
+func runDaemon() error {
 	configDir := paths.ConfigDir()
 	configPath := filepath.Join(configDir, "config.toml")
 	if err := config.WriteDefaultConfig(configPath, nil); err != nil {
@@ -48,5 +50,5 @@ func runDaemon(ctx context.Context) error {
 	logger := daemon.NewLogger(level)
 	stateDir := paths.StateDir()
 	d := daemon.New(userCfg, configPath, stateDir, logger)
-	return d.Run(ctx)
+	return d.Run(context.Background())
 }
