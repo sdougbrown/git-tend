@@ -6,25 +6,23 @@ import (
 	"log/slog"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/daemon"
 	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
-func init() {
-	rootCmd.AddCommand(daemonCmd)
-}
-
-var daemonCmd = &cobra.Command{
-	Use:   "daemon",
+var daemonCmd = &clicontract.Command{
+	Name:  "daemon",
 	Short: "Run the sync daemon (foreground)",
 	Long:  `Start the git-tend daemon in the foreground. Used by launchd/systemd.`,
-	RunE:  runDaemon,
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runDaemon(ctx)
+	},
 }
 
-func runDaemon(cmd *cobra.Command, args []string) error {
+func runDaemon(ctx context.Context) error {
 	configDir := paths.ConfigDir()
 	configPath := filepath.Join(configDir, "config.toml")
 	if err := config.WriteDefaultConfig(configPath, nil); err != nil {
@@ -50,5 +48,5 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	logger := daemon.NewLogger(level)
 	stateDir := paths.StateDir()
 	d := daemon.New(userCfg, configPath, stateDir, logger)
-	return d.Run(context.Background())
+	return d.Run(ctx)
 }

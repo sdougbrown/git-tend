@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,26 +11,24 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/install"
 	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
-func init() {
-	rootCmd.AddCommand(restartCmd)
-}
-
-var restartCmd = &cobra.Command{
-	Use:   "restart",
+var restartCmd = &clicontract.Command{
+	Name:  "restart",
 	Short: "Restart the daemon via the service manager",
 	Long: `Restart the running daemon via systemd (Linux) or launchd (macOS).
 Use this after rebuilding to pick up a new binary, or any time you want
 a fresh daemon process. Does not fetch or rebuild — that's on you.`,
-	RunE: runRestart,
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runRestart()
+	},
 }
 
-func runRestart(cmd *cobra.Command, args []string) error {
+func runRestart() error {
 	pidPath := filepath.Join(paths.StateDir(), "daemon.pid")
 	oldPid, err := readDaemonPid(pidPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

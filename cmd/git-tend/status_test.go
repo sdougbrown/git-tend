@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
-
 	"github.com/sdougbrown/git-tend/internal/status"
 )
 
@@ -94,7 +92,7 @@ func captureStatus(t *testing.T) string {
 	origStdout := os.Stdout
 	os.Stdout = w
 
-	err = runStatus(&cobra.Command{}, nil)
+	err = runStatus()
 
 	w.Close()
 	os.Stdout = origStdout

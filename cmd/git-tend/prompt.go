@@ -1,41 +1,46 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
 )
 
-var (
-	promptShowOffline bool
-	promptAnyStuck    bool
-	promptNoColor     bool
-)
-
-var promptCmd = &cobra.Command{
-	Use:   "prompt",
+var promptCmd = &clicontract.Command{
+	Name:  "prompt",
 	Short: "Print short status segment for shell prompts",
 	Long:  `Print a short status segment for shell prompts. Empty when clean.`,
-	RunE:  runPrompt,
+	Flags: []clicontract.Flag{
+		{Name: "show-offline", Kind: clicontract.Bool, Usage: "Include offline repos in the prompt segment"},
+		{Name: "any-stuck", Kind: clicontract.Bool, Usage: "Exit 1 when stuck repos exist"},
+		{Name: "no-color", Kind: clicontract.Bool, Usage: "Disable ANSI color output"},
+	},
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runPrompt(promptOpts{
+			showOffline: inv.Bools["show-offline"],
+			anyStuck:    inv.Bools["any-stuck"],
+			noColor:     inv.Bools["no-color"],
+		})
+	},
 }
 
-func init() {
-	promptCmd.Flags().BoolVar(&promptShowOffline, "show-offline", false, "Include offline repos in the prompt segment")
-	promptCmd.Flags().BoolVar(&promptAnyStuck, "any-stuck", false, "Exit 1 when stuck repos exist")
-	promptCmd.Flags().BoolVar(&promptNoColor, "no-color", false, "Disable ANSI color output")
-	rootCmd.AddCommand(promptCmd)
+type promptOpts struct {
+	showOffline bool
+	anyStuck    bool
+	noColor     bool
 }
 
-func runPrompt(cmd *cobra.Command, args []string) error {
+func runPrompt(opts promptOpts) error {
 	if os.Getenv("NO_COLOR") != "" {
-		promptNoColor = true
+		opts.noColor = true
 	}
 
 	sf := status.Read(filepath.Join(paths.StateDir(), "status.json"))
@@ -66,21 +71,21 @@ func runPrompt(cmd *cobra.Command, args []string) error {
 	var parts []string
 
 	if down {
-		if promptNoColor {
+		if opts.noColor {
 			parts = append(parts, "\u26a0 tend:down")
 		} else {
 			parts = append(parts, "\033[31m\u26a0 tend:down\033[0m")
 		}
 	} else if stuckCount > 0 {
-		if promptNoColor {
+		if opts.noColor {
 			parts = append(parts, fmt.Sprintf("\u26a0 tend:%d", stuckCount))
 		} else {
 			parts = append(parts, fmt.Sprintf("\033[33m\u26a0 tend:%d\033[0m", stuckCount))
 		}
 	}
 
-	if promptShowOffline && offlineCount > 0 {
-		if promptNoColor {
+	if opts.showOffline && offlineCount > 0 {
+		if opts.noColor {
 			parts = append(parts, fmt.Sprintf("tend:offline:%d", offlineCount))
 		} else {
 			parts = append(parts, fmt.Sprintf("\033[33mtend:offline:%d\033[0m", offlineCount))
@@ -92,7 +97,7 @@ func runPrompt(cmd *cobra.Command, args []string) error {
 		fmt.Print(output)
 	}
 
-	if promptAnyStuck && stuckCount > 0 {
+	if opts.anyStuck && stuckCount > 0 {
 		os.Exit(1)
 	}
 
