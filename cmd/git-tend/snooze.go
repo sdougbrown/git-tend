@@ -1,30 +1,32 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
-var snoozeCmd = &cobra.Command{
-	Use:   "snooze <path> [duration]",
+var snoozeCmd = &clicontract.Command{
+	Name:  "snooze",
 	Short: "Suppress surfacing for a stuck repo",
 	Long:  `Suppress surfacing for a stuck repo until duration expiry (default 1 day).`,
-	Args:  cobra.RangeArgs(1, 2),
-	RunE:  runSnooze,
+	Positionals: []clicontract.Positional{
+		{Name: "path", Required: true},
+		{Name: "duration"},
+	},
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runSnooze(inv.Args)
+	},
 }
 
-func init() {
-	rootCmd.AddCommand(snoozeCmd)
-}
-
-func runSnooze(cmd *cobra.Command, args []string) error {
+func runSnooze(args []string) error {
 	repoPath := paths.ExpandPath(args[0])
 
 	duration := 24 * time.Hour
@@ -52,15 +54,12 @@ func runSnooze(cmd *cobra.Command, args []string) error {
 
 	snoozes[repoPath] = until.Format(time.RFC3339)
 
-	data, err := json.MarshalIndent(snoozes, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling snoozes: %w", err)
-	}
-
-	if err := os.WriteFile(snoozesPath, data, 0644); err != nil {
+	if data, err := json.MarshalIndent(snoozes, "", "  "); err != nil {
+		return fmt.Errorf("encoding snoozes: %w", err)
+	} else if err := os.WriteFile(snoozesPath, data, 0644); err != nil {
 		return fmt.Errorf("writing snoozes: %w", err)
 	}
 
-	fmt.Printf("Snoozed %s until %s\n", repoPath, until.Format(time.RFC3339))
+	fmt.Printf("snoozed %s until %s\n", repoPath, until.Format("2006-01-02 15:04 MST"))
 	return nil
 }

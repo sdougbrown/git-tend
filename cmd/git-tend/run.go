@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/paths"
@@ -14,21 +14,19 @@ import (
 	"github.com/sdougbrown/git-tend/internal/sync"
 )
 
-func init() {
-	rootCmd.AddCommand(runCmd)
-}
-
-var runCmd = &cobra.Command{
-	Use:   "run [path]",
+var runCmd = &clicontract.Command{
+	Name:  "run",
 	Short: "One-shot sync of a single repo",
 	Long: `Run one sync cycle for the git repo at path. The repo must be opted in
 by a .gittend config or a [[repo]] entry in the user config.`,
-	Args: cobra.ExactArgs(1),
-	RunE: runRepo,
+	Positionals: []clicontract.Positional{{Name: "path", Required: true}},
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runRepo(ctx, inv.Args[0])
+	},
 }
 
-func runRepo(cmd *cobra.Command, args []string) error {
-	repoPath := paths.ExpandPath(args[0])
+func runRepo(ctx context.Context, repoPathArg string) error {
+	repoPath := paths.ExpandPath(repoPathArg)
 
 	userCfg, err := config.ParseUserConfig(filepath.Join(paths.ConfigDir(), "config.toml"))
 	if err != nil {
@@ -40,7 +38,6 @@ func runRepo(cmd *cobra.Command, args []string) error {
 	}
 
 	stateDir := paths.StateDir()
-	ctx := context.Background()
 	result := sync.SyncManual(ctx, repoPath, cfg, stateDir)
 	if result.State != "skipped" {
 		if err := recordRunStatus(filepath.Join(stateDir, "status.json"), repoPath, cfg.Mode, result); err != nil {

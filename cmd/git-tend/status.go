@@ -1,28 +1,27 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
 )
 
-func init() {
-	rootCmd.AddCommand(statusCmd)
-}
-
-var statusCmd = &cobra.Command{
-	Use:   "status",
+var statusCmd = &clicontract.Command{
+	Name:  "status",
 	Short: "Print last-sync status for managed repos",
-	RunE:  runStatus,
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runStatus()
+	},
 }
 
-func runStatus(cmd *cobra.Command, args []string) error {
+func runStatus() error {
 	stateDir := paths.StateDir()
 	sf := status.Read(filepath.Join(stateDir, "status.json"))
 

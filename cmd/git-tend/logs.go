@@ -1,32 +1,31 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
-func init() {
-	rootCmd.AddCommand(logsCmd)
-	logsCmd.Flags().BoolP("follow", "f", false, "Follow/tail the log")
-}
-
-var logsCmd = &cobra.Command{
-	Use:   "logs [-f]",
+var logsCmd = &clicontract.Command{
+	Name:  "logs",
 	Short: "Print or tail the daemon log",
 	Long:  `Print or tail the git-tend daemon log file.`,
-	RunE:  runLogs,
+	Flags: []clicontract.Flag{
+		{Name: "follow", Kind: clicontract.Bool, Short: "f", Usage: "Follow/tail the log"},
+	},
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runLogs(inv.Bools["follow"])
+	},
 }
 
-func runLogs(cmd *cobra.Command, args []string) error {
-	follow, _ := cmd.Flags().GetBool("follow")
-
+func runLogs(follow bool) error {
 	if runtime.GOOS == "linux" {
 		var c *exec.Cmd
 		if follow {

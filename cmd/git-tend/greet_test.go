@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
 )
@@ -39,8 +37,7 @@ func TestGreetDateStamp(t *testing.T) {
 	}
 	status.Write(filepath.Join(stateDir, "status.json"), sf)
 
-	cmd := &cobra.Command{}
-	err := runGreet(cmd, nil)
+	err := runGreet(false)
 	if err != nil {
 		t.Fatalf("first greet failed: %v", err)
 	}
@@ -55,7 +52,7 @@ func TestGreetDateStamp(t *testing.T) {
 		t.Errorf("greet.last = %q, want %q", strings.TrimSpace(string(data)), today)
 	}
 
-	err = runGreet(cmd, nil)
+	err = runGreet(false)
 	if err != nil {
 		t.Fatalf("second greet failed: %v", err)
 	}

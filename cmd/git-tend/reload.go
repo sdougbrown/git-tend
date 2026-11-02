@@ -1,28 +1,27 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/paths"
 )
 
-func init() {
-	rootCmd.AddCommand(reloadCmd)
-}
-
-var reloadCmd = &cobra.Command{
-	Use:   "reload",
+var reloadCmd = &clicontract.Command{
+	Name:  "reload",
 	Short: "SIGHUP the running daemon to rescan roots",
 	Long:  `Send SIGHUP to the running daemon to trigger a root rescan and config reload without restarting.`,
-	RunE:  runReload,
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runReload()
+	},
 }
 
-func runReload(cmd *cobra.Command, args []string) error {
+func runReload() error {
 	pidPath := filepath.Join(paths.StateDir(), "daemon.pid")
 	data, err := os.ReadFile(pidPath)
 	if err != nil {

@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/git"
 	"github.com/sdougbrown/git-tend/internal/paths"
@@ -13,23 +14,21 @@ import (
 	gitSync "github.com/sdougbrown/git-tend/internal/sync"
 )
 
-var unstickAll bool
-
-func init() {
-	rootCmd.AddCommand(unstickCmd)
-	unstickCmd.Flags().BoolVar(&unstickAll, "all", false, "Unstick all managed repos")
+var unstickCmd = &clicontract.Command{
+	Name:        "unstick",
+	Short:       "Remove .gittend.stuck and re-enable a repo",
+	Long:        `Remove the .gittend.stuck flag file from a repo, allowing the daemon to resume syncing. Pass --all to unstick every managed repo at once.`,
+	Positionals: []clicontract.Positional{{Name: "path"}},
+	Flags: []clicontract.Flag{
+		{Name: "all", Kind: clicontract.Bool, Usage: "Unstick all managed repos"},
+	},
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, unstickRepo(inv.Bools["all"], inv.Args)
+	},
 }
 
-var unstickCmd = &cobra.Command{
-	Use:   "unstick [<path>]",
-	Short: "Remove .gittend.stuck and re-enable a repo",
-	Long:  `Remove the .gittend.stuck flag file from a repo, allowing the daemon to resume syncing. Pass --all to unstick every managed repo at once.`,
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  unstickRepo,
-}
-
-func unstickRepo(cmd *cobra.Command, args []string) error {
-	if unstickAll {
+func unstickRepo(all bool, args []string) error {
+	if all {
 		return unstickAllRepos()
 	}
 	if len(args) == 0 {

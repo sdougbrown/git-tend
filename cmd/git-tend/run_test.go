@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/spf13/cobra"
 
 	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/paths"
@@ -79,7 +78,7 @@ func TestRunRepoEntryOnlyOptIn(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	t.Chdir(repo)
-	if err := runRepo(&cobra.Command{}, []string{"."}); err != nil {
+	if err := runRepo(context.Background(), "."); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -113,7 +112,7 @@ func TestRunRepoRequiresOptIn(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	t.Chdir(repo)
-	err := runRepo(&cobra.Command{}, []string{"."})
+	err := runRepo(context.Background(), ".")
 	if !errors.Is(err, config.ErrNotOptedIn) {
 		t.Errorf("expected ErrNotOptedIn, got: %v", err)
 	}
@@ -125,7 +124,7 @@ func TestRunRepoFailsOnMalformedUserConfig(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	t.Chdir(repo)
-	err := runRepo(&cobra.Command{}, []string{"."})
+	err := runRepo(context.Background(), ".")
 	if err == nil || !strings.Contains(err.Error(), "loading user config") {
 		t.Errorf("expected user-config error, got: %v", err)
 	}
@@ -156,7 +155,7 @@ func TestRunAfterUnstickBypassesDebounceAndPreservesStatus(t *testing.T) {
 		t.Fatalf("unstick: %v", err)
 	}
 	t.Chdir(repo)
-	if err := runRepo(&cobra.Command{}, []string{"."}); err != nil {
+	if err := runRepo(context.Background(), "."); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 

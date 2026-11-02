@@ -1,35 +1,34 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/sdougbrown/cli-contract"
 
 	"github.com/sdougbrown/git-tend/internal/config"
 	"github.com/sdougbrown/git-tend/internal/paths"
 	"github.com/sdougbrown/git-tend/internal/status"
 )
 
-var greetNoColor bool
-
-var greetCmd = &cobra.Command{
-	Use:   "greet",
+var greetCmd = &clicontract.Command{
+	Name:  "greet",
 	Short: "Print once-per-day startup summary",
-	RunE:  runGreet,
+	Flags: []clicontract.Flag{
+		{Name: "no-color", Kind: clicontract.Bool, Usage: "Disable ANSI color output"},
+	},
+	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+		return nil, runGreet(inv.Bools["no-color"])
+	},
 }
 
-func init() {
-	greetCmd.Flags().BoolVar(&greetNoColor, "no-color", false, "Disable ANSI color output")
-	rootCmd.AddCommand(greetCmd)
-}
-
-func runGreet(cmd *cobra.Command, args []string) error {
+func runGreet(noColor bool) error {
 	if os.Getenv("NO_COLOR") != "" {
-		greetNoColor = true
+		noColor = true
 	}
 
 	stateDir := paths.StateDir()
@@ -88,7 +87,7 @@ func runGreet(cmd *cobra.Command, args []string) error {
 		pathList := strings.Join(stuckPaths, ", ")
 		prefix := "\u26a0 git-tend: "
 		msg := fmt.Sprintf("%d repos stuck (%s) \u2014 run 'git-tend status'", len(stuckPaths), pathList)
-		if greetNoColor {
+		if noColor {
 			fmt.Println(prefix + msg)
 		} else {
 			fmt.Println("\033[33m" + prefix + "\033[0m" + msg)
@@ -96,7 +95,7 @@ func runGreet(cmd *cobra.Command, args []string) error {
 
 		for _, e := range escalated {
 			line := fmt.Sprintf("  %s STUCK FOR %dd", e.path, e.days)
-			if greetNoColor {
+			if noColor {
 				fmt.Println(line)
 			} else {
 				fmt.Println("\033[31m" + line + "\033[0m")
