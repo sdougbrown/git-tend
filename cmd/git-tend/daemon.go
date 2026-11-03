@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"path/filepath"
 
@@ -17,7 +18,7 @@ var daemonCmd = &clicontract.Command{
 	Name:  "daemon",
 	Short: "Run the sync daemon (foreground)",
 	Long:  `Start the git-tend daemon in the foreground. Used by launchd/systemd.`,
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		// The daemon owns its lifecycle signals (SIGINT/SIGTERM shut down
 		// between ticks); Run's context would cancel in-flight syncs.
 		return nil, runDaemon()

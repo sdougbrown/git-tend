@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +21,7 @@ var logsCmd = &clicontract.Command{
 	Flags: []clicontract.Flag{
 		{Name: "follow", Kind: clicontract.Bool, Short: "f", Usage: "Follow/tail the log"},
 	},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runLogs(inv.Bools["follow"])
 	},
 }

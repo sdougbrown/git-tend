@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ var promptCmd = &clicontract.Command{
 		{Name: "any-stuck", Kind: clicontract.Bool, Usage: "Exit 1 when stuck repos exist"},
 		{Name: "no-color", Kind: clicontract.Bool, Usage: "Disable ANSI color output"},
 	},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return runPrompt(promptOpts{
 			showOffline: inv.Bools["show-offline"],
 			anyStuck:    inv.Bools["any-stuck"],

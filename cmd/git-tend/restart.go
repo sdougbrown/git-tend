@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ var restartCmd = &clicontract.Command{
 	Long: `Restart the running daemon via systemd (Linux) or launchd (macOS).
 Use this after rebuilding to pick up a new binary, or any time you want
 a fresh daemon process. Does not fetch or rebuild — that's on you.`,
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runRestart()
 	},
 }

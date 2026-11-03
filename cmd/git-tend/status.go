@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 var statusCmd = &clicontract.Command{
 	Name:  "status",
 	Short: "Print last-sync status for managed repos",
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runStatus()
 	},
 }

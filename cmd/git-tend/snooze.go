@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -21,7 +22,7 @@ var snoozeCmd = &clicontract.Command{
 		{Name: "path", Required: true},
 		{Name: "duration"},
 	},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runSnooze(inv.Args)
 	},
 }

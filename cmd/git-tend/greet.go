@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,7 @@ var greetCmd = &clicontract.Command{
 	Flags: []clicontract.Flag{
 		{Name: "no-color", Kind: clicontract.Bool, Usage: "Disable ANSI color output"},
 	},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runGreet(inv.Bools["no-color"])
 	},
 }

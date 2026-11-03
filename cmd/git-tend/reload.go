@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -16,7 +17,7 @@ var reloadCmd = &clicontract.Command{
 	Name:  "reload",
 	Short: "SIGHUP the running daemon to rescan roots",
 	Long:  `Send SIGHUP to the running daemon to trigger a root rescan and config reload without restarting.`,
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runReload()
 	},
 }
