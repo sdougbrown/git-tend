@@ -10,7 +10,7 @@ import (
 )
 
 func IsMacOS() bool { return runtime.GOOS == "darwin" }
-func IsLinux() bool  { return runtime.GOOS == "linux" }
+func IsLinux() bool { return runtime.GOOS == "linux" }
 
 const (
 	LaunchdLabel = "com.dougthings.gittend"

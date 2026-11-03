@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -22,7 +23,7 @@ var unstickCmd = &clicontract.Command{
 	Flags: []clicontract.Flag{
 		{Name: "all", Kind: clicontract.Bool, Usage: "Unstick all managed repos"},
 	},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, unstickRepo(inv.Bools["all"], inv.Args)
 	},
 }

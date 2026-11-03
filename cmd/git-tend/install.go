@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ var installCmd = &clicontract.Command{
 		{Name: "force", Kind: clicontract.Bool, Usage: "Overwrite existing shell prompt fences"},
 		{Name: "shell", Kind: clicontract.String, Usage: "Shell name override (zsh, bash, fish)"},
 	},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runInstall(installOpts{
 			userOnly:    inv.Bools["user-only"],
 			shellPrompt: inv.Bools["shell-prompt"],
@@ -116,7 +117,7 @@ var uninstallCmd = &clicontract.Command{
 		{Name: "shell-greet", Kind: clicontract.Bool, Usage: "Remove the greet snippet from shell rc"},
 		{Name: "shell", Kind: clicontract.String, Usage: "Shell name override (zsh, bash, fish)"},
 	},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runUninstall(uninstallOpts{
 			shellPrompt: inv.Bools["shell-prompt"],
 			shellGreet:  inv.Bools["shell-greet"],

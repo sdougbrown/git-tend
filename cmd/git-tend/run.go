@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"time"
 
@@ -20,7 +21,7 @@ var runCmd = &clicontract.Command{
 	Long: `Run one sync cycle for the git repo at path. The repo must be opted in
 by a .gittend config or a [[repo]] entry in the user config.`,
 	Positionals: []clicontract.Positional{{Name: "path", Required: true}},
-	Handle: func(ctx context.Context, inv clicontract.Invocation) (any, error) {
+	Handle: func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		return nil, runRepo(ctx, inv.Args[0])
 	},
 }

@@ -4,7 +4,7 @@ go 1.26.8
 
 require (
 	github.com/pelletier/go-toml/v2 v2.3.1
-	github.com/sdougbrown/cli-contract v0.1.0
+	github.com/sdougbrown/cli-contract v0.5.0
 	golang.org/x/sys v0.44.0
 )
 
